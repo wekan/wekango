@@ -15,7 +15,8 @@ do
     case $opt in
         "Install Wekan dependencies")
 
-		if [[ "$OSTYPE" == "linux-gnu" ]]; then
+		if [[ "$OSTYPE" == "linux-gnu" || "$OSTYPE" == "linux-gnueabihf" ]]; then
+			# linux-gnueabihf = Raspberry Pi OS 32bit at RasPi3
 			echo "Linux";
 			# Debian, Ubuntu, Mint
 			for pkg in golang build-essential gcc g++ make git curl wget p7zip-full zip unzip unp npm; do
