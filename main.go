@@ -14,7 +14,7 @@ func getMongoPort() string {
     if port := os.Getenv("MONGODB_PORT"); port != "" {
         return port
     }
-    return "27019"
+    return "27017"
 }
 
 func getMongoURL() string {
