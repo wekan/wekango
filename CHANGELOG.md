@@ -32,5 +32,7 @@ This release adds the following new features:
   Thanks to xet7.
 - [Updated test readme](https://github.com/wekan/wekango/commit/3b679db7702514c3cb53f7ba45757763441d6feb).
   Thanks to xet7.
+- [Updated test readme](https://github.com/wekan/wekango/commit/83c5d99a177b2cbfb2db341156f9b9cf8cc8d3df).
+  Thanks to xet7.
 
 Thanks to above GitHub users for their contributions and translators for their translations.
