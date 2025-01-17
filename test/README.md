@@ -3,6 +3,10 @@
 Testing local webserver with DDoS-level traffic, does webserver handle it and work OK, or crash.
 Do not use this to test any Internet server, it is illegal, police may contact you.
 
+## Other load testing tools
+
+- Gatling
+
 ## Asked from Google Gemini AI
 
 Q: When using Cosmopolitan Redbean at local Ubuntu 24.10 laptop, how to test Redbean DDoS protection locally?
