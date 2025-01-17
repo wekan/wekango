@@ -8,7 +8,7 @@ function pause(){
 
 echo
 PS3='Please enter your choice: '
-options=("Install Wekan dependencies" "Build Wekan" "Run on http://localhost:4000" "Build for all platforms to .build directory" "Quit")
+options=("Install Wekan dependencies" "Build Wekan" "Run on http://localhost:8000" "Build for all platforms to .build directory" "Quit")
 
 select opt in "${options[@]}"
 do
@@ -148,8 +148,8 @@ do
 		break
 		;;
 
-    "Run on http://localhost:4000")
-		WRITABLE_PATH=.. WITH_API=true RICHER_CARD_COMMENT_EDITOR=false ROOT_URL=http://localhost:4000 PORT=4000 ./wekango 2>&1 | tee ../wekan-log.txt
+    "Run on http://localhost:8000")
+		WRITABLE_PATH=.. WITH_API=true RICHER_CARD_COMMENT_EDITOR=false ROOT_URL=http://localhost:8000 PORT=8000 ./wekango 2>&1 | tee ../wekan-log.txt
 		#---------------------------------------------------------------------
 		break
 		;;

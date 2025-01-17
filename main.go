@@ -28,7 +28,7 @@ func getWebPort() string {
     if port := os.Getenv("PORT"); port != "" {
         return port
     }
-    return "5000"
+    return "8000"
 }
 
 func main() {
