@@ -18,5 +18,7 @@ This release adds the following new features:
   Thanks to xet7.
 - [Crosscompiling to many platforms](https://github.com/wekan/wekango/commit/f81dd608f954c07ea8eb32714aa5f2e98b4feaf8).
   Thanks to xet7.
+- [More build target platforms](https://github.com/wekan/wekango/commit/5201fdce629749632ed7337d03e1db59c6cd03a6).
+  Thanks to xet7.
 
 Thanks to above GitHub users for their contributions and translators for their translations.
