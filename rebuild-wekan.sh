@@ -162,18 +162,40 @@ do
 		if [[ "$OSTYPE" == "darwin"* ]]; then
 			# On macOS, include BSD platforms along with well-supported platforms
             platforms=$(go tool dist list | grep -E "^(darwin|linux|windows)/(amd64|arm64)")
+            # Add Raspberry Pi targets
+            platforms="$platforms
+linux/arm
+linux/arm64"
 		elif [[ "$OSTYPE" == "freebsd"* || "$OSTYPE" == "dragonfly"* ]]; then
 			# On BSD, build for all BSD platforms plus Darwin
 			platforms=$(go tool dist list | grep -E "^(freebsd|openbsd|netbsd|dragonfly|darwin)/(amd64|arm64)")
 		else
-			# On Linux and other platforms, exclude BSD platforms
+			# On Linux and other platforms, exclude BSD platforms and add Raspberry Pi targets
             platforms=$(go tool dist list | grep -E "^(linux|windows|darwin)/(amd64|arm64|386)" | grep -v -E "^(solaris|plan9|js|android|ios|freebsd|openbsd|netbsd|dragonfly)")
+            # Add Raspberry Pi targets and s390x
+            platforms="$platforms
+linux/arm
+linux/arm64
+linux/s390x"
 		fi
 		
 		build_platform() {
 			local platform=$1
 			IFS="/" read -r GOOS GOARCH <<< "$platform"
 			output_name=".build/wekan-$GOOS-$GOARCH"
+			
+			# Add Raspberry Pi specific naming
+			if [ "$GOOS" = "linux" ]; then
+				case "$GOARCH" in
+					"arm")
+						output_name=".build/wekan-raspberrypi-armhf"
+						;;
+					"arm64")
+						output_name=".build/wekan-raspberrypi-arm64"
+						;;
+				esac
+			fi
+			
 			if [ "$GOOS" = "windows" ]; then
 				output_name+='.exe'
 			fi
@@ -188,9 +210,11 @@ do
 					"linux")
 					case "$GOARCH" in
 						"arm")
-							export CC="arm-linux-gnueabihf-gcc"  # Note: changed from gnueabi to gnueabihf
-							export CXX="arm-linux-gnueabihf-g++"
+							export CC="arm-linux-gnueabi-gcc"
+							export CXX="arm-linux-gnueabi-g++"
 							export GOARM=6
+							export CGO_CFLAGS="-march=armv6 -marm -mfpu=vfp -mfloat-abi=softfp"
+							export CGO_LDFLAGS="-march=armv6 -marm -mfpu=vfp -mfloat-abi=softfp"
 							;;
 						"arm64")
 							export CC="aarch64-linux-gnu-gcc"
@@ -199,6 +223,10 @@ do
 						"386")
 							export CC="gcc -m32"
 							export CXX="g++ -m32"
+							;;
+						"s390x")
+							export CC="s390x-linux-gnu-gcc"
+							export CXX="s390x-linux-gnu-g++"
 							;;
 						*)
 							export CC="gcc"
