@@ -1,1 +1,4 @@
 wekango
+.build
+*.zip
+android-ndk*
