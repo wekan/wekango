@@ -20,5 +20,17 @@ This release adds the following new features:
   Thanks to xet7.
 - [More build target platforms](https://github.com/wekan/wekango/commit/5201fdce629749632ed7337d03e1db59c6cd03a6).
   Thanks to xet7.
+- [Updated ports](https://github.com/wekan/wekango/commit/b957e2dc3f43e95e0b22f28938f9a0cd0af67b34).
+  Thanks to xet7.
+- [Add page text](https://github.com/wekan/wekango/commit/9424167154bd558d2b6422e6193d361099416877).
+  Thanks to xet7.
+- [Added test](https://github.com/wekan/wekango/commit/5fc80d39f4f2666eafa0b1b045a2b1cee707a1e8).
+  Thanks to xet7.
+- [To rebuild-wekan.sh, added Raspberry Pi OS 32bit at RasPi3](https://github.com/wekan/wekango/commit/975169680151e721683482a5d2298487b4ff8148).
+  Thanks to xet7.
+- [Updated test](https://github.com/wekan/wekango/commit/a8337d7da5710594fe2b7749c9e1c6b564d1c641).
+  Thanks to xet7.
+- [Updated test readme](https://github.com/wekan/wekango/commit/3b679db7702514c3cb53f7ba45757763441d6feb).
+  Thanks to xet7.
 
 Thanks to above GitHub users for their contributions and translators for their translations.
