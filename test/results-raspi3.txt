@@ -1,0 +1,59 @@
+Swap off:
+dphys-swapfile swapoff
+
+$ ps -aux --sort -rss | grep wekango
+wekan     4106 32.5  1.4 665448 14040 pts/1    Sl+  02:00   1:49 ./wekango
+wekan     4175  0.0  0.1   7552  1792 pts/2    S+   02:06   0:00 grep --color=auto wekango
+
+wekango: 47% CPU
+Running 30s test @ http://127.0.0.1:8000/
+  12 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    13.61ms   14.82ms 167.63ms   86.82%
+    Req/Sec   755.63    237.32     2.43k    74.71%
+  271352 requests in 30.10s, 1.17GB read
+Requests/sec:   9015.13
+Transfer/sec:     39.88MB
+
+wekanstudio/redbean: 97% CPU
+Running 30s test @ http://127.0.0.1:8000/
+  12 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   886.86ms  436.50ms   1.99s    66.11%
+    Req/Sec    10.30      8.53    60.00     75.48%
+  1611 requests in 30.19s, 5.82MB read
+  Socket errors: connect 0, read 0, write 0, timeout 44
+Requests/sec:     53.36
+Transfer/sec:    197.55KB
+
+wami: 4% CPU
+Running 30s test @ http://127.0.0.1:8000/
+  12 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    10.43ms   46.75ms   1.77s    99.70%
+    Req/Sec   158.25     69.96   454.00     81.40%
+  24607 requests in 30.05s, 40.44MB read
+  Socket errors: connect 0, read 24606, write 1, timeout 7
+Requests/sec:    818.82
+Transfer/sec:      1.35MB
+
+wekango: 47% CPU, no swap, answers pages in 0.1 seconds at netsurf, stays responsive.
+330 free RAM. Using Netsurf, wekango, top.
+Running 5m test @ http://127.0.0.1:8000/
+  12 threads and 100 connections
+^C  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    14.77ms   15.57ms 165.70ms   87.01%
+    Req/Sec   676.77    227.52     2.16k    73.85%
+  1088946 requests in 2.25m, 4.70GB read
+Requests/sec:   8080.60
+Transfer/sec:     35.74MB
+
+wekango:
+Running 5m test @ http://127.0.0.1:8000/
+  12 threads and 100 connections
+^C  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    14.32ms   15.40ms 179.83ms   87.08%
+    Req/Sec   709.04    232.15     2.75k    73.43%
+  1144514 requests in 2.25m, 4.94GB read
+Requests/sec:   8468.37
+Transfer/sec:     37.46MB

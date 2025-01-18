@@ -1,46 +1,11 @@
-RAM usage:
-wekango:
-ps -aux --sort -rss | grep wekango
-wekan     310270  284  0.0 3377084 20660 pts/0   Sl+  23:31  18:24 ./wekango
-wekan     310645  0.0  0.0   6644  2356 pts/1    S+   23:37   0:00 grep --color=auto wekango
 
-wekan:
-Running 30s test @ http://127.0.0.1:7000/sign-in
-  12 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   193.80ms   22.25ms 356.52ms   88.65%
-    Req/Sec    42.43     20.71    80.00     59.38%
-  14816 requests in 30.02s, 193.12MB read
-Requests/sec:    493.59
-Transfer/sec:      6.43MB
 
-wekanstudio:
-Running 30s test @ http://127.0.0.1:8000/
-  12 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     4.74ms   42.90ms   1.67s    99.16%
-    Req/Sec     5.18k     2.06k   16.55k    76.31%
-  1849956 requests in 30.10s, 6.53GB read
-Requests/sec:  61463.13
-Transfer/sec:    222.21MB
+          RasPi3         i7
+wekango   700 req/s
+wekan                    500 req/s
 
-wekango:
-Running 30s test @ http://127.0.0.1:8000/
-  12 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     1.10ms    1.25ms  13.19ms   84.79%
-    Req/Sec     9.80k     1.05k   14.94k    68.33%
-  3518775 requests in 30.10s, 1.06GB read
-Requests/sec: 116905.22
-Transfer/sec:     35.90MB
-
-wami: crashed
-Running 30s test @ http://127.0.0.1:8000/
-  12 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     4.91ms   33.01ms   1.67s    99.68%
-    Req/Sec   380.22    205.04     1.26k    81.15%
-  46433 requests in 30.04s, 76.30MB read
-  Socket errors: connect 0, read 46435, write 0, timeout 11
-Requests/sec:   1545.74
-Transfer/sec:      2.54MB
+RasPi3, when running DDoS level traffic:
+- wekango keeps being responsive, with Netsurf, reloading page in 0.1s. 300 MB free RAM of 1 GB.
+  RasPi3 running graphical desktop, Netsurf, wrk, wekango, top. No swap used.
+- WeKan Studio Redbean timeout often
+- wami often has socket errors, does not work properly
