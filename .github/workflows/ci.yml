@@ -105,6 +105,8 @@ jobs:
             go test -race ./internal/clientip -run TestSourceClientKeyDifferential -count=1
           WEKAN_SOURCE_ROOT="$PWD/.tools/wekan-reference" \
             go test -race ./internal/eventlog -count=1
+          WEKAN_SOURCE_ROOT="$PWD/.tools/wekan-reference" \
+            go test -race ./internal/api -run TestUserBoardsSourcePolicy -count=1
       - name: Verify existing SQLite board in Chromium and Firefox
         run: |
           set -euo pipefail

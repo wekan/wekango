@@ -78,9 +78,13 @@ func TestBoardReadAdministratorListings(t *testing.T) {
 	if !reflect.DeepEqual(got, map[string]any{"private": float64(1), "public": float64(5)}) {
 		t.Fatalf("counts intentionally include helper/archived/untyped boards: %#v", got)
 	}
-	// This route also requires security-event folding before its full port.
-	if w := request(h, "GET", "/api/users/member/boards", "member", "", ""); w.Code != 404 {
-		t.Fatal("pending user listing was exposed")
+	// Shared security-event folding now permits the user listing to be ported;
+	// it still requires authentication (full membership cases live in its suite).
+	if w := request(h, "GET", "/api/users/member/boards", "member", "", ""); w.Code != 200 {
+		t.Fatal("own user listing unavailable", w.Code)
+	}
+	if w := request(h, "GET", "/api/users/member/boards", "", "", ""); w.Code != 401 {
+		t.Fatal("anonymous user listing exposed", w.Code)
 	}
 }
 

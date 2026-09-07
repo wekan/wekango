@@ -55,6 +55,16 @@ The embedded preview page supports local-password sign-in and authorized board
 reads. It is not the complete Meteor browser bundle. Missing functionality is
 listed in the roadmap; absent APIs do not silently accept writes.
 
+`GET /api/users/:userId/boards` accepts the named user or an administrator. It
+returns sorted `_id`/`title` pairs for active memberships in unarchived real
+boards, excluding caret-wrapped helper titles. Revoked memberships are withheld
+and counted in the existing medium-severity StaleBleed report without exposing
+board titles. That severity does not block accounts in the source policy.
+Report-write failure cannot change the listing's authorization decision.
+
+The [login security review](Go-Login-Security.md) records the typed BSON and
+Meteor bcrypt safeguards verified against the saved CodeQL findings.
+
 ## API usage reports
 
 Requests under `/api` update WeKan's existing `eventlog` collection with

@@ -39,6 +39,11 @@ const base = process.env.WEKANGO_BROWSER_URL || 'http://127.0.0.1:3900';
       assert.equal(login.status(), 200);
       const {token} = await login.json();
       const headers = {Authorization:`Bearer ${token}`};
+      const ownBoards = await page.request.get(`${base}/api/users/browser-user/boards`, {headers});
+      assert.equal(ownBoards.status(), 200);
+      assert.deepEqual(await ownBoards.json(), [{_id:'browser-board', title:'Existing SQLite board'}]);
+      const otherBoards = await page.request.get(`${base}/api/users/another-user/boards`, {headers});
+      assert.equal(otherBoards.status(), 403);
       for (const [route, expected] of [
         ['/api/boards/browser-board/lists','browser-list'],
         ['/api/boards/browser-board/swimlanes','browser-lane'],

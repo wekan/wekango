@@ -30,7 +30,7 @@ result = {
     'restRoutes': [{'method': m, 'path': p} for m, p in sorted(routes)],
     'collections': sorted(collections),
     'schemaUpgradeSteps': steps,
-    'implementedREST': ['POST /users/login (local password only)', 'POST /users/logout', 'GET /api/boards/:boardId', 'GET /api/boards (admin public-board listing)', 'GET /api/boards_count', 'GET /api/boards/:boardId/lists', 'GET /api/boards/:boardId/lists/:listId', 'GET /api/boards/:boardId/swimlanes', 'GET /api/boards/:boardId/swimlanes/:swimlaneId', 'GET /api/boards/:boardId/lists/:listId/cards', 'GET /api/boards/:boardId/swimlanes/:swimlaneId/cards', 'GET /api/cards/:cardId', 'GET /api/boards/:boardId/lists/:listId/cards/:cardId'],
+    'implementedREST': ['POST /users/login (local password only)', 'POST /users/logout', 'GET /api/boards/:boardId', 'GET /api/boards (admin public-board listing)', 'GET /api/boards_count', 'GET /api/boards/:boardId/lists', 'GET /api/boards/:boardId/lists/:listId', 'GET /api/boards/:boardId/swimlanes', 'GET /api/boards/:boardId/swimlanes/:swimlaneId', 'GET /api/boards/:boardId/lists/:listId/cards', 'GET /api/boards/:boardId/swimlanes/:swimlaneId/cards', 'GET /api/cards/:cardId', 'GET /api/boards/:boardId/lists/:listId/cards/:cardId', 'GET /api/users/:userId/boards'],
     'restScope': 'registered handler slice with shared eventlog usage reporting; inherited per-flush count discrepancy, historical date formats and complete middleware parity remain pending',
     'implementedMigrations': steps,
     'migrationScope': 'current twelve-step schema-upgrade pipeline only; older Meteor migration history remains pending',

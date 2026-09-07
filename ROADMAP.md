@@ -56,7 +56,7 @@ with `python3 scripts/sync-compatibility.py /path/to/wekan` and review its diff.
 | MongoDB protocol client | Official MongoDB Go Driver v2.9.0 | External MONGO_URL or private embedded endpoint; BSON document shapes retained |
 | Password hashing | golang.org/x/crypto v0.56.0 | Existing Meteor SHA256-then-bcrypt local password verification; other mechanisms remain gated |
 | Environment and files | Go standard library | Bundle `PORT=8080`; `ROOT_URL`; external `MONGO_URL`; `WRITABLE_PATH`; `FERRETDB_SQLITE_DIR` / `FERRETDB_SQLITE_URL`; attachment/avatar paths |
-| REST reads | Project-owned Go handlers | Local sessions plus thirteen registered REST handlers: board, list, swimlane and card reads, admin public-board list/counts; write routes, user-board security-event side effects and full middleware parity remain pending |
+| REST reads | Project-owned Go handlers | Local sessions plus fourteen registered REST handlers: board, list, swimlane and card reads, admin public-board list/counts; self/admin user-board listing with revoked-membership reports; write routes and full middleware parity remain pending |
 | Database utilities | MongoDB mongo-tools `v0.0.0-20260903204226-5df87866650a`, Apache-2.0 | Eight command adapters in the same process; BSON/archive/Extended JSON/GridFS round trips verified; backend monitoring gaps noted below |
 | Current schema upgrades | Project-owned Go implementation | All twelve current steps, version-gated background startup, exact one-time checklist marker, historical file path recovery and live HTML/JSON dashboard; older Meteor migration history remains pending |
 | Release automation | `build.sh` + GitHub Actions | FerretDB's 25 candidate targets; checksums, native smoke CI, pinned actions, dependency audit, human-triggered draft release |
@@ -129,6 +129,12 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
 - [x] Record API use through the existing `eventlog` summary schema, with bounded
   in-memory batching, account/route-pattern identity, proxy-derived addresses,
   display-only geography, bounded actor tallies and shutdown flushing.
+- [x] Add self/admin user-board listing with strict active membership, archive
+  and helper-board filtering. Fold revoked-membership probes as medium-severity
+  StaleBleed reports without blocking the caller or logging board titles.
+- [x] Review saved login CodeQL findings: typed literal BSON lookup and mandatory
+  Meteor prehash-plus-bcrypt verification have adversarial tests and narrowly
+  scoped false-positive annotations. See docs/Go-Login-Security.md.
 - [ ] Resolve the inherited source writer's batch-count discrepancy: it currently
   increments once per flush, ignoring the producer's accumulated `count`. This
   port preserves that observed behavior; stored counts are not exact call totals.
@@ -198,8 +204,9 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
    - Extend the implemented `HTTP_FORWARDED_COUNT` REST throttle behavior to
      DDP and other client-address consumers when those surfaces are ported.
 3. **One real interactive board slice**
-   - Finish user-board listing's security logging and account-blocking side
-     effects using the implemented shared fold; resolve API batched counts and
+   - Port the remaining security catalog and high/critical account-blocking side
+     effects beyond the implemented medium-severity user-board report; resolve
+     API batched counts and
      extend informal legacy activity-date parsing beyond tested
      BSON, numeric, ISO and RFC formats.
    - Expand legacy event folding's malformed counter/date coercions and test

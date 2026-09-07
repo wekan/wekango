@@ -18,10 +18,9 @@ import (
 
 // registerBoardReads ports the read handlers in server/models/{boards,lists,
 // swimlanes,cards}.js. The existing single-board handler is registered by New.
-// The user-board listing remains unregistered until its revoked-membership
-// security-event and account-blocking dependencies port. Shared API usage
-// accounting wraps all routes in api.go.
+// Shared API usage accounting wraps all routes in api.go.
 func (s *service) registerBoardReads(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/users/{userID}/boards", s.userBoards)
 	mux.HandleFunc("GET /api/boards", s.publicBoards)
 	mux.HandleFunc("GET /api/boards_count", s.boardCounts)
 	mux.HandleFunc("GET /api/boards/{boardID}/lists", s.boardLists)
@@ -160,7 +159,14 @@ func boardReadFields(doc bson.M, keys ...string) bson.M {
 	return out
 }
 
-var boardReadCaretTitle = regexp.MustCompile(`^\^.*\^$`)
+var boardReadCaretTitle = regexp.MustCompile(`^\^[^\r\n\x{2028}\x{2029}]*\^$`)
+
+func boardReadTrimTitle(title string) string {
+	// JavaScript trim includes BOM and excludes NEL; Go TrimSpace differs.
+	return strings.TrimFunc(title, func(r rune) bool {
+		return (r >= 9 && r <= 13) || r == 32 || r == 0xa0 || r == 0x1680 || (r >= 0x2000 && r <= 0x200a) || r == 0x2028 || r == 0x2029 || r == 0x202f || r == 0x205f || r == 0x3000 || r == 0xfeff
+	})
+}
 
 func boardReadVisibleSummaries(boards []bson.M) []bson.M {
 	out := []bson.M{}
@@ -168,7 +174,7 @@ func boardReadVisibleSummaries(boards []bson.M) []bson.M {
 		if b["type"] != "board" {
 			continue
 		}
-		if title, ok := b["title"].(string); ok && boardReadCaretTitle.MatchString(strings.TrimSpace(title)) {
+		if title, ok := b["title"].(string); ok && boardReadCaretTitle.MatchString(boardReadTrimTitle(title)) {
 			continue
 		}
 		out = append(out, boardReadFields(b, "_id", "title"))

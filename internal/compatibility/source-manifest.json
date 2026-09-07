@@ -768,7 +768,8 @@
     "GET /api/boards/:boardId/lists/:listId/cards",
     "GET /api/boards/:boardId/swimlanes/:swimlaneId/cards",
     "GET /api/cards/:cardId",
-    "GET /api/boards/:boardId/lists/:listId/cards/:cardId"
+    "GET /api/boards/:boardId/lists/:listId/cards/:cardId",
+    "GET /api/users/:userId/boards"
   ],
   "implementedMigrations": [
     "archived-flag-backfill",
