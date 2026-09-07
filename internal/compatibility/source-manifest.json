@@ -1,6 +1,6 @@
 {
   "source": "https://github.com/wekan/wekan",
-  "commit": "1fd544e487c007fd409a33d4c446016ee6516254",
+  "commit": "bafcf6eefc3c7d5e502d130165efe04a381b73ba",
   "scope": "literal JavaScript references; dynamic routes, environment aliases and collection constructors require additional audit",
   "environment": [
     "ACCOUNTS_COMMON_LOGIN_EXPIRATION_IN_DAYS",
@@ -769,8 +769,12 @@
     "GET /api/boards/:boardId/swimlanes/:swimlaneId/cards",
     "GET /api/cards/:cardId",
     "GET /api/boards/:boardId/lists/:listId/cards/:cardId",
-    "GET /api/users/:userId/boards"
+    "GET /api/users/:userId/boards",
+    "GET /api/user",
+    "GET /api/users",
+    "GET /api/users/:userId"
   ],
+  "restScope": "registered handler slice with shared eventlog usage reporting; inherited per-flush count discrepancy, historical date formats and complete middleware parity remain pending",
   "implementedMigrations": [
     "archived-flag-backfill",
     "swimlane-structure",
@@ -785,6 +789,5 @@
     "checklist-minicard-unset",
     "fs-path-heal"
   ],
-  "migrationScope": "current twelve-step schema-upgrade pipeline only; older Meteor migration history remains pending",
-  "restScope": "registered handler slice with shared eventlog usage reporting; inherited per-flush count discrepancy, historical date formats and complete middleware parity remain pending"
+  "migrationScope": "current twelve-step schema-upgrade pipeline only; older Meteor migration history remains pending"
 }

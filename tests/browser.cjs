@@ -39,6 +39,35 @@ const base = process.env.WEKANGO_BROWSER_URL || 'http://127.0.0.1:3900';
       assert.equal(login.status(), 200);
       const {token} = await login.json();
       const headers = {Authorization:`Bearer ${token}`};
+      const ownUser = await page.request.get(`${base}/api/user`, {headers});
+      assert.equal(ownUser.status(), 200);
+      const ownProfile = await ownUser.json();
+      assert.equal(ownProfile._id, 'browser-user');
+      assert.equal(ownProfile.profile.fullname, 'Browser Test');
+      assert.ok(!Object.hasOwn(ownProfile, 'services'));
+      assert.ok(ownProfile.boards.some(member => member.boardId === 'revoked-board' && member.isActive === false));
+      assert.ok(ownProfile.boards.every(member => !Object.hasOwn(member, 'userId')));
+      for (const route of ['/api/users', '/api/users/browser-user']) {
+        assert.equal((await page.request.get(base + route, {headers})).status(), 403);
+        assert.equal((await page.request.get(base + route)).status(), 401);
+      }
+      const adminLogin = await page.request.post(`${base}/users/login`, {data:{username:'browser-admin', password:'browser-fixture-password'}});
+      assert.equal(adminLogin.status(), 200);
+      const adminHeaders = {Authorization:`Bearer ${(await adminLogin.json()).token}`};
+      const userList = await page.request.get(`${base}/api/users`, {headers:adminHeaders});
+      assert.equal(userList.status(), 200);
+      assert.deepEqual((await userList.json()).sort((a,b)=>a._id.localeCompare(b._id)), [
+        {_id:'browser-admin-id', username:'browser-admin'}, {_id:'browser-user', username:'browser-user'},
+      ]);
+      for (const id of ['browser-admin', 'browser-admin-id']) {
+        const profile = await page.request.get(`${base}/api/users/${id}`, {headers:adminHeaders});
+        assert.equal(profile.status(), 200);
+        const data = await profile.json();
+        assert.equal(data._id, 'browser-admin-id');
+        assert.ok(!Object.hasOwn(data, 'services'));
+        assert.ok(!Object.hasOwn(data, 'sessionData'));
+        assert.deepEqual(data.boards, []);
+      }
       const ownBoards = await page.request.get(`${base}/api/users/browser-user/boards`, {headers});
       assert.equal(ownBoards.status(), 200);
       assert.deepEqual(await ownBoards.json(), [{_id:'browser-board', title:'Existing SQLite board'}]);
@@ -70,7 +99,7 @@ const base = process.env.WEKANGO_BROWSER_URL || 'http://127.0.0.1:3900';
       assert.equal(state.steps['board-allows-defaults'].status, state.gated ? 'skipped' : 'done');
       for (const [step, progress] of Object.entries(state.steps)) assert.notEqual(progress.status, 'error', `${step}: ${progress.error}`);
       await page.screenshot({ path: `${process.env.WEKANGO_SCREENSHOTS || '.'}/${name}-schema-upgrade.png` });
-      console.log(`${name}: existing SQLite board/list/swimlane/card reads, authorization and startup dashboard passed`);
+      console.log(`${name}: existing SQLite board/list/swimlane/card and user reads, authorization and startup dashboard passed`);
     } finally { await browser.close(); }
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -37,6 +37,8 @@ func main() {
 	must(e)
 	_, e = db.Collection("users").InsertOne(ctx, bson.M{"_id": "browser-user", "username": "browser-user", "authenticationMethod": "password", "profile": bson.M{"fullname": "Browser Test"}, "services": bson.M{"password": bson.M{"bcrypt": string(hash)}, "resume": bson.M{"loginTokens": bson.A{}}}})
 	must(e)
+	_, e = db.Collection("users").InsertOne(ctx, bson.M{"_id": "browser-admin-id", "username": "browser-admin", "isAdmin": true, "authenticationMethod": "password", "sessionData": bson.M{"private": "server-only-state"}, "services": bson.M{"password": bson.M{"bcrypt": string(hash)}, "resume": bson.M{"loginTokens": bson.A{}}}})
+	must(e)
 	_, e = db.Collection("boards").InsertOne(ctx, bson.M{"_id": "browser-board", "type": "board", "archived": false, "title": "Existing SQLite board", "description": "Stored with FerretDB before the application starts.", "members": bson.A{bson.M{"userId": "browser-user", "isActive": true, "isAdmin": true}}})
 	must(e)
 	_, e = db.Collection("boards").InsertOne(ctx, bson.M{"_id": "revoked-board", "type": "board", "archived": false, "title": "Revoked private board", "members": bson.A{bson.M{"userId": "browser-user", "isActive": false}}})

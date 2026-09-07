@@ -69,3 +69,33 @@ func TestDisabledAPIIsNotUsage(t *testing.T) {
 		t.Fatal(events)
 	}
 }
+
+func TestUserReadUsageGroupsTrailingSlashAliases(t *testing.T) {
+	db, _, _ := userReadsFixture(t)
+	var events []bson.M
+	reporter := eventlog.NewReporter(time.Hour, func(_ context.Context, event bson.M) error {
+		events = append(events, event)
+		return nil
+	})
+	t.Cleanup(reporter.Close)
+	handler := New(db, Options{WithAPI: true, Usage: reporter})
+	for _, path := range []string{"/api/user", "/api/users", "/api/users/self"} {
+		for _, suffix := range []string{"", "/"} {
+			if response := request(handler, "GET", path+suffix, "admin", "", ""); response.Code != 200 {
+				t.Fatalf("%s: %d %s", path+suffix, response.Code, response.Body.String())
+			}
+		}
+	}
+	reporter.Close()
+	if len(events) != 3 {
+		t.Fatalf("aliases created distinct usage rows: %#v", events)
+	}
+	expected := map[string]bool{"GET /api/user": true, "GET /api/users": true, "GET /api/users/:userId": true}
+	for _, event := range events {
+		name, _ := event["api"].(string)
+		if !expected[name] || fmt.Sprint(event["count"]) != "2" {
+			t.Fatalf("wrong grouped route/count: %#v", event)
+		}
+		delete(expected, name)
+	}
+}

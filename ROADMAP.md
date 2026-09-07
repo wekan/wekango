@@ -56,7 +56,7 @@ with `python3 scripts/sync-compatibility.py /path/to/wekan` and review its diff.
 | MongoDB protocol client | Official MongoDB Go Driver v2.9.0 | External MONGO_URL or private embedded endpoint; BSON document shapes retained |
 | Password hashing | golang.org/x/crypto v0.56.0 | Existing Meteor SHA256-then-bcrypt local password verification; other mechanisms remain gated |
 | Environment and files | Go standard library | Bundle `PORT=8080`; `ROOT_URL`; external `MONGO_URL`; `WRITABLE_PATH`; `FERRETDB_SQLITE_DIR` / `FERRETDB_SQLITE_URL`; attachment/avatar paths |
-| REST reads | Project-owned Go handlers | Local sessions plus fourteen registered REST handlers: board, list, swimlane and card reads, admin public-board list/counts; self/admin user-board listing with revoked-membership reports; write routes and full middleware parity remain pending |
+| REST | Project-owned Go handlers | Seventeen operations including local sessions and board, list, swimlane and card reads, admin public-board list/counts; self/admin user-board listing with revoked-membership reports; self profile and admin user list/detail reads; write routes and full middleware parity remain pending |
 | Security events | Project-owned Go service | 54-category source catalog, sanitized summaries, independent account-blocking effects, shutdown joining; user-board guard integrated, remaining guards depend on their endpoint ports |
 | Database utilities | MongoDB mongo-tools `v0.0.0-20260903204226-5df87866650a`, Apache-2.0 | Eight command adapters in the same process; BSON/archive/Extended JSON/GridFS round trips verified; backend monitoring gaps noted below |
 | Current schema upgrades | Project-owned Go implementation | All twelve current steps, version-gated background startup, exact one-time checklist marker, historical file path recovery and live HTML/JSON dashboard; older Meteor migration history remains pending |
@@ -138,6 +138,10 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   only identified accounts after high/critical refusals, using existing
   loginDisabled/services.securityBlock fields. Effects fail independently and
   finish before storage closes; the user-board guard uses the shared service.
+- [x] Add self-profile and admin user-list/detail reads, preserving ID-before-
+  username lookup, credential redaction and first-membership summaries, including
+  inactive/archived memberships as in the source. Imported primitive IDs,
+  malformed members and public error responses have regression coverage.
 - [x] Review saved login CodeQL findings: typed literal BSON lookup and mandatory
   Meteor prehash-plus-bcrypt verification have adversarial tests. The follow-up
   alert #3 is a reviewed false positive; source comments do not dismiss GitHub
@@ -180,6 +184,12 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   token is rejected while another account at the same address retains access.
   Native report tests verify the asynchronous StaleBleed event survives graceful
   shutdown and remains readable through embedded mongoexport.
+- User-read differential tests execute the three actual JavaScript handlers,
+  authentication helpers and public error mapper over the same embedded database
+  as Go. Forty-five responses cover ordinary and malformed membership states;
+  snapshots verify records are unchanged. Tests include ID/username precedence,
+  legacy primitive IDs, token rejection, redaction, optional slashes and HEAD.
+  Chromium and Firefox verify self profiles and admin list/detail responses.
 - The built native executable is statically linked; version stamping and its
   per-binary SHA256 file verify.
 - `tests/browser.cjs` passes in Chromium and Firefox against the real executable:

@@ -38,6 +38,9 @@ func usageRoute(pattern string) string {
 	if !ok {
 		route = pattern
 	}
+	// Optional-slash aliases represent the same Express route, not a new
+	// endpoint containing ServeMux's end-of-path marker.
+	route = strings.TrimSuffix(route, "/{$}")
 	// Registered Go wildcards have the same parameter boundaries as Express.
 	// The existing API routes use ID in Go and Id in their public patterns.
 	route = strings.ReplaceAll(route, "{", ":")

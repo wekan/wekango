@@ -96,6 +96,7 @@ func New(db *mongo.Database, opts Options) http.Handler {
 	s := &service{db: db, options: opts, attempts: make(map[string]*attempt), dummy: dummy, events: opts.Security}
 	mux := http.NewServeMux()
 	s.registerBoardReads(mux)
+	s.registerUserReads(mux)
 	mux.HandleFunc("GET /api/boards/{boardID}", s.board)
 	mux.HandleFunc("POST /users/login", s.login)
 	mux.HandleFunc("POST /users/logout", s.logout)

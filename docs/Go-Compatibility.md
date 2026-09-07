@@ -65,6 +65,23 @@ Report-write failure cannot change the listing's authorization decision.
 The [login security review](Go-Login-Security.md) records the typed BSON and
 Meteor bcrypt safeguards verified against the saved CodeQL findings.
 
+## User reads
+
+`GET /api/user` returns the signed-in user's document without `services`.
+`GET /api/users` is admin-only and returns just `_id` and `username`.
+`GET /api/users/:userId` is admin-only, tries an exact ID before a username, and
+removes both `services` and `sessionData`. These routes accept an optional
+trailing slash. Password hashes and session tokens are never included.
+
+Self/detail responses add `boards`: one membership per matching `type: 'board'`
+document, carrying the first matching membership's fields with `boardId` in
+place of `userId`. Unlike the active-board listing endpoint, this profile summary
+includes inactive memberships and archived boards. Reads do not mutate stored
+members or credentials. A missing detail lookup and malformed membership data
+retain the source's generic HTTP 500 response; admin denial is 403 and missing
+or invalid authentication is 401. Self-view `sessionData` is retained as in the
+source; admin detail removes it. User creation, updates and deletion are pending.
+
 ## Security events
 
 The shared service ports the 54-entry WeKan security catalog and writes the
