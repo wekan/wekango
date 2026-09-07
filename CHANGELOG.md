@@ -2,7 +2,21 @@
 
 # Upcoming WeKan ® release
 
-This release adds the following new features:
+- [Build the Go drop-in compatibility foundation](https://github.com/wekan/wekango/commit/8f320c0).
+  Thanks to xet7.
+  Caddy, the application server and FerretDB SQLite run in one executable.
+  Preserve existing bundle paths and test Meteor local sessions, authorized
+  board reads and the exact one-time checklist migration. Copy WeKan docs,
+  record remaining parity work in ROADMAP.md, and add platform build/release
+  workflows with dependency license, source-notice and vulnerability audits.
+  All 25 binaries cross-compile and verify checksums; Go/race and real-browser
+  checks pass on Linux ARM64. Full Meteor UI, migrations and attachments remain
+  unfinished, so this is a compatibility preview, not a production replacement.
+- [Remove the obsolete driver and HTML demo](https://github.com/wekan/wekango/commit/7aad9a3).
+  Thanks to xet7. The original demo remains available in git history; the older
+  prototype entries below describe work superseded by the new implementation.
+
+Current implementation work and earlier prototype history:
 
 - [Added detecting is database MongoDB 3 or MongoDB 6. Added webserver](https://github.com/wekan/wekango/commit/f61596deed1a89fc11fc2cd7b52c7e73977eba9e).
   Thanks to xet7.
