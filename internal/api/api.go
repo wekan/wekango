@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -308,20 +307,13 @@ func (s *service) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	selector := bson.M{"username": username}
-	if eok {
-		selector = bson.M{"emails.address": email}
-	}
-	var u user
-	err = s.db.Collection("users").FindOne(r.Context(), selector).Decode(&u)
-	digest := sha256.Sum256([]byte(password))
-	encoded := []byte(hex.EncodeToString(digest[:]))
+	u, err := s.findLoginUser(r.Context(), username, email, eok)
 	local := err == nil && !u.Disabled && (u.Method == "" || u.Method == "password") && u.Services.TwoFactor == nil && len(u.Services.Other) == 0 && u.Services.Password.Bcrypt != "" && u.Services.Password.Argon2 == ""
 	hash := s.dummy
 	if local {
 		hash = []byte(u.Services.Password.Bcrypt)
 	}
-	match := bcrypt.CompareHashAndPassword(hash, encoded) == nil
+	match := compareMeteorPassword(hash, password)
 	if !local || !match {
 		reject()
 		return
@@ -335,7 +327,7 @@ func (s *service) login(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	// Recheck account policy with the password hash atomically when issuing the
 	// token, so a concurrent disable, LDAP switch or 2FA enable cannot be bypassed.
-	selector = bson.M{"_id": u.ID, "loginDisabled": bson.M{"$ne": true}, "services.password.bcrypt": u.Services.Password.Bcrypt, "services.password.argon2": bson.M{"$exists": false}, "services.twoFactorAuthentication": bson.M{"$exists": false}, "authenticationMethod": u.Method}
+	selector := bson.M{"_id": u.ID, "loginDisabled": bson.M{"$ne": true}, "services.password.bcrypt": u.Services.Password.Bcrypt, "services.password.argon2": bson.M{"$exists": false}, "services.twoFactorAuthentication": bson.M{"$exists": false}, "authenticationMethod": u.Method}
 	if u.Method == "" {
 		delete(selector, "authenticationMethod")
 		selector["$or"] = bson.A{bson.M{"authenticationMethod": ""}, bson.M{"authenticationMethod": bson.M{"$exists": false}}}

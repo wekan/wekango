@@ -13,6 +13,15 @@ const base = process.env.WEKANGO_BROWSER_URL || 'http://127.0.0.1:3900';
       const page = await browser.newPage();
       await page.goto(base);
       assert.equal(await page.title(), 'WeKan Go — compatibility preview');
+      for (const data of [
+        {username: {$ne:null}, password:'browser-fixture-password'},
+        {email: {$regex:'.*'}, password:'browser-fixture-password'},
+        {username:'browser-user', password:{$ne:null}},
+      ]) {
+        const rejected = await page.request.post(`${base}/users/login`, {data});
+        assert.equal(rejected.status(), 401);
+        assert.ok(!Object.hasOwn(await rejected.json(), 'token'));
+      }
       await page.locator('[name=username]').fill('browser-user');
       await page.locator('[name=password]').fill('wrong-password');
       await page.locator('#login button').click();
