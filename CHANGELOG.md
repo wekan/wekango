@@ -2,6 +2,17 @@
 
 # Upcoming WeKan ® release
 
+- [Preserve forwarded client addresses across the embedded proxy](https://github.com/wekan/wekango/commit/edf7190).
+  Thanks to xet7.
+  Honor HTTP_FORWARDED_COUNT at Caddy's public ingress, preserving Meteor's
+  decimal-prefix parsing, right-counted nonempty forwarded chain and original
+  socket fallback. Pass the computed address through the private proxy without
+  allowing forged or hop-by-hop headers to replace it. Ninety actual-source
+  comparisons, 64 Caddy network cases and native executable throttle tests pass,
+  along with the full Go suite, affected race suites and Chromium/Firefox login,
+  board-resource authorization and startup-dashboard checks. Other client-address
+  consumers remain pending with their corresponding DDP/API surfaces.
+
 - [Embed database tools and extend board resource reads](https://github.com/wekan/wekango/commit/b6bc8ee).
   Thanks to xet7.
   All eight MongoDB tools run inside the same executable, retaining upstream
