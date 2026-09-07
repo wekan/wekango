@@ -77,6 +77,11 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: tests/package-lock.json
+      - name: Check JavaScript syntax and migration fixtures
+        run: |
+          export TMPDIR="$PWD/.tools/tmp"
+          mkdir -p "$TMPDIR"
+          node --test tests/javascript.test.cjs
       - name: Install test browsers
         run: |
           export TMPDIR="$PWD/.tools/tmp"

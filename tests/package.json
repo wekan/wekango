@@ -3,7 +3,8 @@
   "private": true,
   "license": "MIT",
   "scripts": {
-    "test": "node browser.cjs"
+    "test": "node browser.cjs",
+    "test:javascript": "node --test javascript.test.cjs"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

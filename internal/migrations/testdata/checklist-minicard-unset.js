@@ -1,4 +1,9 @@
-  {
+'use strict';
+// Standalone snapshot of the corresponding WeKan schema-upgrade step.
+const MARKER_COLL = '_wekan_migration';
+const CHECKLIST_MINICARD_MARKER_ID = 'checklist-minicard-unset';
+
+module.exports = {
     // checklist-minicard-unset: `showChecklistAtMinicard: false` written by the
     // old schema default, which now means something it did not mean then.
     //
@@ -39,6 +44,4 @@
       );
       return { fixed: (r && r.modifiedCount) || 0, unresolved: 0 };
     },
-  },
-
-  {
+};
