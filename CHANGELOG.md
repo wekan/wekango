@@ -2,6 +2,15 @@
 
 # Upcoming WeKan ® release
 
+- [Correct handling of the follow-up Meteor password-prehash CodeQL alert](https://github.com/wekan/wekango/commit/53ae916).
+  Thanks to xet7.
+  Alert #3 reports the intermediate SHA-256 input without accounting for the
+  mandatory salted bcrypt comparison. Preserve existing Meteor credentials and
+  remove ineffective suppression annotations. Document why a rescan does not
+  dismiss this reviewed false positive and provide the precise maintainer
+  disposition. Password and hostile-login regression tests pass under the race
+  detector. The remote alert remains open pending that disposition.
+
 - [Preserve user board listing authorization and revoked-access reports](https://github.com/wekan/wekango/commit/ebaacc4).
   Thanks to xet7.
   List active, unarchived boards for the caller or an administrator, with the
@@ -15,11 +24,12 @@
   Review the saved CodeQL injection and weak-password-hash findings. Login uses
   constant typed BSON selectors and the complete existing Meteor SHA-256 prehash
   plus salted bcrypt verification; neither operator objects nor bare hashes can
-  authenticate. Narrow annotations document these two false positives without
+  authenticate. The security review documents these two false positives without
   disabling the rules elsewhere. Adversarial JSON/form inputs, literal query
   metacharacters, changed long-password suffixes and invalid verifiers have
   regression tests; Chromium and Firefox reject login operator payloads.
-  No remote alert is dismissed; GitHub CodeQL must rerun after publication.
+  No remote alert is dismissed; see the follow-up alert #3 review above for
+  the corrected explanation of GitHub suppression handling.
 
 - [Preserve API usage reports in existing event summaries](https://github.com/wekan/wekango/commit/bd49757).
   Thanks to xet7.
