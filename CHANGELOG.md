@@ -2,6 +2,19 @@
 
 # Upcoming WeKan ® release
 
+- [Port the twelve current schema upgrades and live progress dashboard](https://github.com/wekan/wekango/commit/416962d).
+  Thanks to xet7.
+  Run the current WeKan schema pipeline in the background, preserving its
+  version gate, once-ever checklist marker, step order, stored choices and
+  historical filesystem recovery. Keep unresolved work eligible for retry;
+  honor skip/force flags and join the upgrade before closing SQLite. Serve
+  escaped HTML and JSON progress at the existing schema-upgrade-status URL.
+  Real FerretDB fixtures compare JavaScript and Go documents, counters and
+  marker history across initial, gated, forced and new-version runs. Go/race,
+  Chromium/Firefox and executable restart checks pass. All 25 platform binaries
+  cross-compile with verified checksums. ROADMAP.md records that the older
+  Meteor migration chain and full product parity still remain unfinished.
+
 - [Build the Go drop-in compatibility foundation](https://github.com/wekan/wekango/commit/8f320c0).
   Thanks to xet7.
   Caddy, the application server and FerretDB SQLite run in one executable.
