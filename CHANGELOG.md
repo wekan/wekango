@@ -2,6 +2,16 @@
 
 # Upcoming WeKan ® release
 
+- [Preserve security-event summaries and account-specific blocking](https://github.com/wekan/wekango/commit/d4bc664).
+  Thanks to xet7.
+  Port the 54-category catalog, detail sanitizer, field precedence and existing
+  account-block metadata. Only high/critical refusals naming an account block
+  it; neighbors sharing its address retain access. Reporting and blocking fail
+  independently and finish before storage closes. The user-board guard now
+  uses this shared service. Actual-source, SQLite, race and native shutdown
+  tests pass, together with Chromium and Firefox checks. Other runtime guards
+  and DDP context integration remain tied to their endpoint/method ports.
+
 - [Correct handling of the follow-up Meteor password-prehash CodeQL alert](https://github.com/wekan/wekango/commit/53ae916).
   Thanks to xet7.
   Alert #3 reports the intermediate SHA-256 input without accounting for the
