@@ -26,7 +26,6 @@ func (s *service) findLoginUser(ctx context.Context, username, email string, byE
 	var u user
 	// Constant BSON field names and typed string values, not executable query
 	// text. TestLoginSelectorsRejectOperators covers hostile JSON/form inputs.
-	// codeql[go/sql-injection]
 	err := s.db.Collection("users").FindOne(ctx, selector).Decode(&u)
 	return u, err
 }
@@ -39,7 +38,7 @@ func (s *service) findLoginUser(ctx context.Context, username, email string, byE
 func compareMeteorPassword(stored []byte, password string) bool {
 	// CodeQL reports this intermediate hash without considering the mandatory
 	// bcrypt comparison below. TestMeteorPasswordRequiresBcrypt pins that boundary.
-	// codeql[go/weak-sensitive-data-hashing]
+	// See docs/Go-Login-Security.md for the reviewed CodeQL false positive.
 	digest := sha256.Sum256([]byte(password))
 	return bcrypt.CompareHashAndPassword(stored, []byte(hex.EncodeToString(digest[:]))) == nil
 }

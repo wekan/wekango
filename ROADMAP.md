@@ -133,8 +133,9 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   and helper-board filtering. Fold revoked-membership probes as medium-severity
   StaleBleed reports without blocking the caller or logging board titles.
 - [x] Review saved login CodeQL findings: typed literal BSON lookup and mandatory
-  Meteor prehash-plus-bcrypt verification have adversarial tests and narrowly
-  scoped false-positive annotations. See docs/Go-Login-Security.md.
+  Meteor prehash-plus-bcrypt verification have adversarial tests. The follow-up
+  alert #3 is a reviewed false positive; source comments do not dismiss GitHub
+  alerts. Maintainer disposition remains pending. See docs/Go-Login-Security.md.
 - [ ] Resolve the inherited source writer's batch-count discrepancy: it currently
   increments once per flush, ignoring the producer's accumulated `count`. This
   port preserves that observed behavior; stored counts are not exact call totals.
