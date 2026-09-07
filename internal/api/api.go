@@ -23,6 +23,7 @@ import (
 )
 
 type Options struct {
+	Security              *eventlog.SecurityReporter
 	Usage                 *eventlog.Reporter
 	TrustedClientIPHeader bool
 	WithAPI               bool
@@ -34,7 +35,7 @@ type Options struct {
 }
 
 type service struct {
-	events   *eventlog.Writer
+	events   *eventlog.SecurityReporter
 	db       *mongo.Database
 	options  Options
 	mutex    sync.Mutex
@@ -89,7 +90,10 @@ func New(db *mongo.Database, opts Options) http.Handler {
 	if err != nil {
 		panic(err)
 	}
-	s := &service{db: db, options: opts, attempts: make(map[string]*attempt), dummy: dummy, events: eventlog.NewWriter(db)}
+	if opts.Security == nil {
+		opts.Security = eventlog.NewSecurityReporter(db)
+	}
+	s := &service{db: db, options: opts, attempts: make(map[string]*attempt), dummy: dummy, events: opts.Security}
 	mux := http.NewServeMux()
 	s.registerBoardReads(mux)
 	mux.HandleFunc("GET /api/boards/{boardID}", s.board)

@@ -57,6 +57,7 @@ with `python3 scripts/sync-compatibility.py /path/to/wekan` and review its diff.
 | Password hashing | golang.org/x/crypto v0.56.0 | Existing Meteor SHA256-then-bcrypt local password verification; other mechanisms remain gated |
 | Environment and files | Go standard library | Bundle `PORT=8080`; `ROOT_URL`; external `MONGO_URL`; `WRITABLE_PATH`; `FERRETDB_SQLITE_DIR` / `FERRETDB_SQLITE_URL`; attachment/avatar paths |
 | REST reads | Project-owned Go handlers | Local sessions plus fourteen registered REST handlers: board, list, swimlane and card reads, admin public-board list/counts; self/admin user-board listing with revoked-membership reports; write routes and full middleware parity remain pending |
+| Security events | Project-owned Go service | 54-category source catalog, sanitized summaries, independent account-blocking effects, shutdown joining; user-board guard integrated, remaining guards depend on their endpoint ports |
 | Database utilities | MongoDB mongo-tools `v0.0.0-20260903204226-5df87866650a`, Apache-2.0 | Eight command adapters in the same process; BSON/archive/Extended JSON/GridFS round trips verified; backend monitoring gaps noted below |
 | Current schema upgrades | Project-owned Go implementation | All twelve current steps, version-gated background startup, exact one-time checklist marker, historical file path recovery and live HTML/JSON dashboard; older Meteor migration history remains pending |
 | Release automation | `build.sh` + GitHub Actions | FerretDB's 25 candidate targets; checksums, native smoke CI, pinned actions, dependency audit, human-triggered draft release |
@@ -132,6 +133,11 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
 - [x] Add self/admin user-board listing with strict active membership, archive
   and helper-board filtering. Fold revoked-membership probes as medium-severity
   StaleBleed reports without blocking the caller or logging board titles.
+- [x] Port the shared security-event service: all 54 catalog entries, detail
+  sanitization and explicit/default field precedence. Fold reports and block
+  only identified accounts after high/critical refusals, using existing
+  loginDisabled/services.securityBlock fields. Effects fail independently and
+  finish before storage closes; the user-board guard uses the shared service.
 - [x] Review saved login CodeQL findings: typed literal BSON lookup and mandatory
   Meteor prehash-plus-bcrypt verification have adversarial tests. The follow-up
   alert #3 is a reviewed false positive; source comments do not dismiss GitHub
@@ -167,6 +173,13 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   verifies route grouping and reads shutdown-flushed SQLite reports through the
   same executable's `mongoexport` command. The inherited per-flush count behavior
   is explicitly asserted; no exact request-count claim is made.
+- Security source differentials cover all 54 catalog entries, 36 formatter
+  fixtures and 20 complete event/policy fixtures. Real SQLite/race tests verify
+  account-only blocking, retained credentials, failure/panic isolation,
+  snapshotting caller input and shutdown races. A blocked account's existing
+  token is rejected while another account at the same address retains access.
+  Native report tests verify the asynchronous StaleBleed event survives graceful
+  shutdown and remains readable through embedded mongoexport.
 - The built native executable is statically linked; version stamping and its
   per-binary SHA256 file verify.
 - `tests/browser.cjs` passes in Chromium and Firefox against the real executable:
@@ -205,8 +218,8 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
    - Extend the implemented `HTTP_FORWARDED_COUNT` REST throttle behavior to
      DDP and other client-address consumers when those surfaces are ported.
 3. **One real interactive board slice**
-   - Port the remaining security catalog and high/critical account-blocking side
-     effects beyond the implemented medium-severity user-board report; resolve
+   - Connect the shared security-event service to each remaining guard as its
+     endpoint/method is ported, including DDP request identity. Resolve
      API batched counts and
      extend informal legacy activity-date parsing beyond tested
      BSON, numeric, ISO and RFC formats.

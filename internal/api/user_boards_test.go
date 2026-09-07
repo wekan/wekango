@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wekan/wekango/internal/eventlog"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -64,7 +65,9 @@ func userBoardsFixture(t *testing.T) (*mongo.Database, http.Handler) {
 	} {
 		insert(t, db, "boards", doc)
 	}
-	return db, New(db, Options{WithAPI: true})
+	security := eventlog.NewSecurityReporter(db)
+	t.Cleanup(security.Close)
+	return db, New(db, Options{WithAPI: true, Security: security})
 }
 
 func TestUserBoardsSelfAdminAndStrictActiveMembership(t *testing.T) {
@@ -204,5 +207,20 @@ func TestUserBoardsHelperTitleWhitespace(t *testing.T) {
 		if (len(got) == 1) != tc.visible {
 			t.Fatalf("%q visibility %#v", tc.title, got)
 		}
+	}
+}
+
+func TestSecurityBlockRejectsExistingTokenWithoutBlockingNeighbor(t *testing.T) {
+	db, handler := userBoardsFixture(t)
+	reports := eventlog.NewSecurityReporter(db)
+	reports.Record(bson.M{"key": "authz.export", "action": "blocked", "source": "test guard"}, eventlog.SecurityContext{UserID: "member", IP: "192.0.2.1"})
+	reports.Close()
+	denied := request(handler, http.MethodGet, "/api/users/member/boards", "member", "", "")
+	if denied.Code != http.StatusUnauthorized {
+		t.Fatalf("disabled account retained token access: %d %s", denied.Code, denied.Body.String())
+	}
+	neighbor := request(handler, http.MethodGet, "/api/users/other/boards", "other", "", "")
+	if neighbor.Code != http.StatusOK {
+		t.Fatalf("same-address neighbor denied: %d %s", neighbor.Code, neighbor.Body.String())
 	}
 }

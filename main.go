@@ -127,6 +127,9 @@ func run() error {
 	usage := eventlog.NewDatabaseReporter(db, eventlog.UsageFlushInterval(os.Getenv("WEKAN_API_USAGE_FLUSH_MS")))
 	defer usage.Close()
 	apiOptions.Usage = usage
+	security := eventlog.NewSecurityReporter(db)
+	defer security.Close()
+	apiOptions.Security = security
 	apiHandler := api.New(db, apiOptions)
 	mux := http.NewServeMux()
 	mux.Handle("GET /schema-upgrade-status", schema.Handler())

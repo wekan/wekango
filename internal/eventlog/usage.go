@@ -217,10 +217,8 @@ func usageLater(a, b any) bool {
 	return usageNumber(a) > usageNumber(b)
 }
 
-// UsageFlushInterval matches Number(WEKAN_API_USAGE_FLUSH_MS) || 10000 followed by
-// Node's timer normalization. Fractions truncate and out-of-range timers become
-// one millisecond; blank/zero/NaN use the ten-second application default.
-func UsageFlushInterval(value string) time.Duration {
+// jsStringNumber converts an ECMAScript numeric string, including radix prefixes.
+func jsStringNumber(value string) float64 {
 	s := geoTrim(value)
 	var milliseconds float64
 	var err error
@@ -248,6 +246,14 @@ func UsageFlushInterval(value string) time.Duration {
 			}
 		}
 	}
+	return milliseconds
+}
+
+// UsageFlushInterval matches Number(WEKAN_API_USAGE_FLUSH_MS) || 10000 followed by
+// Node's timer normalization. Fractions truncate and out-of-range timers become
+// one millisecond; blank/zero/NaN use the ten-second application default.
+func UsageFlushInterval(value string) time.Duration {
+	milliseconds := jsStringNumber(value)
 	if milliseconds == 0 || math.IsNaN(milliseconds) {
 		milliseconds = 10000
 	}

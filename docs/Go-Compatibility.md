@@ -65,6 +65,28 @@ Report-write failure cannot change the listing's authorization decision.
 The [login security review](Go-Login-Security.md) records the typed BSON and
 Meteor bcrypt safeguards verified against the saved CodeQL findings.
 
+## Security events
+
+The shared service ports the 54-entry WeKan security catalog and writes the
+existing `stream: 'security'` summaries. Detail text is collapsed to one line,
+stripped of ASCII controls and capped at 500 UTF-16 units. Username/IP limits,
+explicit field overrides and catalog/default precedence follow the source.
+Display-only geography cannot authorize a request.
+
+A refused high/critical event with an authenticated account sets that account's
+`loginDisabled` and `services.securityBlock`, preserving the reason, timestamp,
+source, bleed name and address. It retains existing credentials and tokens;
+authentication refuses tokens while the account is disabled. It never selects
+other users by address. Medium-severity, anonymous and sanitized events remain
+reports without account blocking, matching the source policy.
+
+Report folding and account blocking run independently after the guard's refusal.
+Each effect has a five-second database context; neither a failed write nor a
+panic changes the guard result or suppresses the other effect. Graceful shutdown
+stops admissions and joins pending work before storage closes. A process crash
+can still lose an event. The user-board listing is integrated; other guards and
+DDP identity propagation arrive with their endpoint/method ports.
+
 ## API usage reports
 
 Requests under `/api` update WeKan's existing `eventlog` collection with
