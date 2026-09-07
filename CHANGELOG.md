@@ -2,6 +2,16 @@
 
 # Upcoming WeKan ® release
 
+- [Fix incomplete migration fixture JavaScript syntax](https://github.com/wekan/wekango/commit/db90485).
+  Thanks to xet7.
+  The checklist-minicard snapshot was an incomplete object fragment, causing
+  CodeQL's JavaScript parser to stop at its async method. Export a complete
+  module with the original marker constants and remove the dangling next-object
+  opener. CI checks every repository JavaScript file and verifies once-ever
+  marker behavior, legacy false-value removal and rejection of the malformed
+  fragment. All four regression tests and workflow validation pass locally;
+  GitHub's CodeQL scan must rerun after the maintainer publishes the fix.
+
 - [Preserve forwarded client addresses across the embedded proxy](https://github.com/wekan/wekango/commit/edf7190).
   Thanks to xet7.
   Honor HTTP_FORWARDED_COUNT at Caddy's public ingress, preserving Meteor's
