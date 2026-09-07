@@ -2,6 +2,17 @@
 
 # Upcoming WeKan ® release
 
+- [Make login query and password verification security boundaries explicit](https://github.com/wekan/wekango/commit/b28f0b6).
+  Thanks to xet7.
+  Review the saved CodeQL injection and weak-password-hash findings. Login uses
+  constant typed BSON selectors and the complete existing Meteor SHA-256 prehash
+  plus salted bcrypt verification; neither operator objects nor bare hashes can
+  authenticate. Narrow annotations document these two false positives without
+  disabling the rules elsewhere. Adversarial JSON/form inputs, literal query
+  metacharacters, changed long-password suffixes and invalid verifiers have
+  regression tests; Chromium and Firefox reject login operator payloads.
+  No remote alert is dismissed; GitHub CodeQL must rerun after publication.
+
 - [Preserve API usage reports in existing event summaries](https://github.com/wekan/wekango/commit/bd49757).
   Thanks to xet7.
   Batch API requests by account and route pattern and write the existing
