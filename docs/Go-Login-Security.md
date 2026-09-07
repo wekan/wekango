@@ -76,3 +76,39 @@ References: [CodeQL injection query](https://codeql.github.com/codeql-query-help
 [Go suppression metadata query](https://github.com/github/codeql/blob/main/go/ql/src/AlertSuppression.ql),
 [GitHub suppression-to-dismissal mechanism](https://github.com/advanced-security/dismiss-alerts),
 and [Meteor password server](https://github.com/meteor/meteor/blob/release/METEOR%403.4.1/packages/accounts-password/password_server.js).
+
+## Re-enabled accounts and concurrent blocking
+
+`services.securityBlock` is historical refusal metadata, not an authentication
+provider. Local bcrypt accounts can log in after being re-enabled while keeping
+that metadata, their password hash and unrelated profile/email fields intact.
+LDAP, two-factor authentication and unknown providers remain gated until ported.
+
+The source `server/models/users.js` disable/enable actions assign empty strings,
+but installed Collection2/SimpleSchema cleaning converts those dotted `$set`
+values into `$unset`. Normal re-enabling therefore leaves `loginDisabled` absent;
+normal disabling also removes `services.resume.loginTokens`. Accounts-base
+recreates a missing token array with atomic `$addToSet`, which Go now preserves.
+A raw imported string token field is malformed and is rejected, not silently
+replaced. Existing arrays are never replaced from an earlier account snapshot.
+
+The source login validation hook uses JavaScript truthiness. Go accepts missing,
+null, false, empty-string and zero disabled flags, but rejects nonempty strings
+(including `"false"`), nonzero numbers, arrays and objects. Both existing bearer
+sessions and password login enforce this check. The direct Meteor local REST
+password path bypasses its DDP validation hook; Go intentionally retains its
+stronger disabled-account rejection for both paths.
+
+Token issuance compares the observed disabled field and password/authentication
+state in the same database update. A concurrent disable cannot append a token
+after the account changes to a truthy flag. Real SQLite tests intercept the
+outgoing token update, disable through an independent client, and verify rejection
+and unchanged token count for boolean, string, array and object flags.
+
+Concurrent successful logins also require database-level mutation isolation.
+The previously pinned FerretDB v1.71.0 reads a document before opening its write
+transaction, then replaces the whole document by `_id`. Two `$addToSet` calls
+can consequently overwrite each other's tokens; a Go-only mutex would leave
+other Mongo wire clients and embedded database tools exposed. The maintained
+fork fix serializes mutation read/modify/write work in its shared handler.
+See [the runtime source copy](Go-FerretDB-Source.md) for provenance and scope.

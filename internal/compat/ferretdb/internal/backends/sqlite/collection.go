@@ -1,0 +1,652 @@
+// Copyright 2021 FerretDB Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package sqlite
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	sqlite3 "modernc.org/sqlite"
+	sqlite3lib "modernc.org/sqlite/lib"
+
+	"github.com/FerretDB/FerretDB/internal/backends"
+	"github.com/FerretDB/FerretDB/internal/backends/sqlite/metadata"
+	"github.com/FerretDB/FerretDB/internal/handler/sjson"
+	"github.com/FerretDB/FerretDB/internal/types"
+	"github.com/FerretDB/FerretDB/internal/util/fsql"
+	"github.com/FerretDB/FerretDB/internal/util/lazyerrors"
+	"github.com/FerretDB/FerretDB/internal/util/must"
+)
+
+// collection implements backends.Collection interface.
+type collection struct {
+	r      *metadata.Registry
+	dbName string
+	name   string
+}
+
+// newCollection creates a new Collection.
+func newCollection(r *metadata.Registry, dbName, name string) backends.Collection {
+	return backends.CollectionContract(&collection{
+		r:      r,
+		dbName: dbName,
+		name:   name,
+	})
+}
+
+// Query implements backends.Collection interface.
+func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*backends.QueryResult, error) {
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil {
+		return &backends.QueryResult{
+			Iter: newQueryIterator(ctx, nil, params.OnlyRecordIDs),
+		}, nil
+	}
+
+	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if meta == nil {
+		return &backends.QueryResult{
+			Iter: newQueryIterator(ctx, nil, params.OnlyRecordIDs),
+		}, nil
+	}
+
+	distinctPushdown := params.DistinctField != "" && len(params.DecodeFields) != 0 &&
+		!params.OnlyRecordIDs && !meta.Capped()
+	index := ""
+	if numericIndex, field := preferredNumericRangeIndex(meta.TableName, meta.Settings.Indexes, params.Filter); field != "" {
+		q := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %q ON %q (%s)`, numericIndex, meta.TableName,
+			fmt.Sprintf(`%s->>%s`, metadata.DefaultColumn, quoteJSONLabel(field)))
+		if _, err := db.ExecContext(ctx, q); err == nil {
+			index = numericIndex
+		}
+	}
+	if index == "" {
+		index = preferredCompoundIndex(meta.TableName, meta.Settings.Indexes, params.Filter)
+	}
+	if index == "" && distinctPushdown {
+		index = preferredDistinctIndex(meta.TableName, meta.Settings.Indexes, params.DistinctField, params.DecodeFields)
+	}
+	indexClause := ""
+	if index != "" {
+		indexClause = fmt.Sprintf(` INDEXED BY %q`, index)
+	}
+
+	// Push the filter's top-level equality conditions down to
+	// SQLite (superset semantics; the Go filter stays authoritative). Previously
+	// only a bare {_id: X} filter was pushed down, so every other query decoded
+	// the WHOLE collection in Go on every Meteor poll.
+	whereClause, args := prepareWhereClause(params.Filter)
+	if distinctPushdown {
+		exists := `json_type(` + jsonPathExpr(params.DistinctField) + `) IS NOT NULL`
+		if whereClause == "" {
+			whereClause = ` WHERE ` + exists
+		} else {
+			whereClause += ` AND ` + exists
+		}
+	}
+
+	suffix := indexClause + whereClause + prepareOrderByClause(params.Sort)
+
+	if params.Limit != 0 {
+		suffix += ` LIMIT ?`
+		args = append(args, params.Limit)
+	}
+
+	q := ""
+	if distinctPushdown {
+		q = prepareDistinctSelectClause(meta.TableName, params.Comment, params.DecodeFields, suffix)
+	} else {
+		q = prepareSelectClause(meta.TableName, params.Comment, meta.Capped(), params.OnlyRecordIDs) + suffix
+	}
+
+	queryStarted := time.Now()
+	rows, err := db.QueryContext(ctx, q, args...)
+	queryDuration := time.Since(queryStarted)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	iter := newQueryIterator(ctx, rows, params.OnlyRecordIDs, params.DecodeFields)
+	if os.Getenv("DEBUGSPEED") == "true" {
+		iter = newSpeedQueryIterator(iter, &querySpeed{
+			logger:        c.r.Logger(),
+			database:      c.dbName,
+			collection:    c.name,
+			operation:     params.Operation,
+			filterFields:  queryFieldNames(params.Filter),
+			sortFields:    queryFieldNames(params.Sort),
+			index:         index,
+			limit:         params.Limit,
+			queryDuration: queryDuration,
+		})
+	}
+
+	return &backends.QueryResult{
+		Iter: iter,
+	}, nil
+}
+
+func queryFieldNames(doc *types.Document) string {
+	if doc == nil {
+		return ""
+	}
+	return strings.Join(doc.Keys(), ",")
+}
+
+// InsertAll implements backends.Collection interface.
+func (c *collection) InsertAll(ctx context.Context, params *backends.InsertAllParams) (*backends.InsertAllResult, error) {
+	// Only take the registry's GLOBAL write lock when the collection
+	// does not exist yet. CollectionCreate write-locks the whole registry even
+	// when it is a no-op, so previously EVERY insert (sessions, activities, login
+	// tokens, ...) stalled all concurrent readers' RLocks — a steady stream of
+	// small Meteor writes kept every polling query futex-waiting. CollectionCreate
+	// is idempotent, so two racing first inserts are still safe.
+	if c.r.CollectionGet(ctx, c.dbName, c.name) == nil {
+		if _, err := c.r.CollectionCreate(ctx, &metadata.CollectionCreateParams{DBName: c.dbName, Name: c.name}); err != nil {
+			return nil, lazyerrors.Error(err)
+		}
+	}
+
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+
+	err := db.InTransaction(ctx, func(tx *fsql.Tx) error {
+		batchSize := c.r.BatchSize
+		if batchSize < 1 {
+			panic("batch-size should be greater or equal to 1")
+		}
+
+		var batch []*types.Document
+		docs := params.Docs
+
+		for len(docs) > 0 {
+			i := min(batchSize, len(docs))
+			batch, docs = docs[:i], docs[i:]
+
+			q, args, err := prepareInsertStatement(meta.TableName, meta.Capped(), batch)
+			if err != nil {
+				return lazyerrors.Error(err)
+			}
+
+			if _, err = tx.ExecContext(ctx, q, args...); err != nil {
+				var se *sqlite3.Error
+				if errors.As(err, &se) && se.Code() == sqlite3lib.SQLITE_CONSTRAINT_UNIQUE {
+					return backends.NewError(backends.ErrorCodeInsertDuplicateID, err)
+				}
+
+				return lazyerrors.Error(err)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return new(backends.InsertAllResult), nil
+}
+
+// UpdateAll implements backends.Collection interface.
+func (c *collection) UpdateAll(ctx context.Context, params *backends.UpdateAllParams) (*backends.UpdateAllResult, error) {
+	var res backends.UpdateAllResult
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil {
+		return &res, nil
+	}
+
+	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if meta == nil {
+		return &res, nil
+	}
+
+	q := fmt.Sprintf(`UPDATE %q SET %s = ? WHERE %s = ?`, meta.TableName, metadata.DefaultColumn, metadata.IDColumn)
+
+	err := db.InTransaction(ctx, func(tx *fsql.Tx) error {
+		for _, doc := range params.Docs {
+			b, err := sjson.Marshal(doc)
+			if err != nil {
+				return lazyerrors.Error(err)
+			}
+
+			id, _ := doc.Get("_id")
+			must.NotBeZero(id)
+
+			arg := string(must.NotFail(sjson.MarshalSingleValue(id)))
+
+			r, err := tx.ExecContext(ctx, q, string(b), arg)
+			if err != nil {
+				return lazyerrors.Error(err)
+			}
+
+			ra, err := r.RowsAffected()
+			if err != nil {
+				return lazyerrors.Error(err)
+			}
+
+			res.Updated += int32(ra)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	return &res, nil
+}
+
+// DeleteAll implements backends.Collection interface.
+func (c *collection) DeleteAll(ctx context.Context, params *backends.DeleteAllParams) (*backends.DeleteAllResult, error) {
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil {
+		return &backends.DeleteAllResult{Deleted: 0}, nil
+	}
+
+	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if meta == nil {
+		return &backends.DeleteAllResult{Deleted: 0}, nil
+	}
+
+	// TODO https://github.com/FerretDB/FerretDB/issues/3888
+
+	var column string
+	var placeholders []string
+	var args []any
+
+	if params.RecordIDs == nil {
+		placeholders = make([]string, len(params.IDs))
+		args = make([]any, len(params.IDs))
+
+		for i, id := range params.IDs {
+			placeholders[i] = "?"
+			args[i] = string(must.NotFail(sjson.MarshalSingleValue(id)))
+		}
+
+		column = metadata.IDColumn
+	} else {
+		placeholders = make([]string, len(params.RecordIDs))
+		args = make([]any, len(params.RecordIDs))
+
+		for i, id := range params.RecordIDs {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+
+		column = metadata.RecordIDColumn
+	}
+
+	q := fmt.Sprintf(`DELETE FROM %q WHERE %s IN (%s)`, meta.TableName, column, strings.Join(placeholders, ", "))
+
+	res, err := db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	ra, err := res.RowsAffected()
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	return &backends.DeleteAllResult{
+		Deleted: int32(ra),
+	}, nil
+}
+
+// Explain implements backends.Collection interface.
+func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams) (*backends.ExplainResult, error) {
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil {
+		return &backends.ExplainResult{
+			QueryPlanner: must.NotFail(types.NewDocument()),
+		}, nil
+	}
+
+	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if meta == nil {
+		return &backends.ExplainResult{
+			QueryPlanner: must.NotFail(types.NewDocument()),
+		}, nil
+	}
+
+	selectClause := prepareSelectClause(meta.TableName, "", meta.Capped(), false)
+	if index := preferredCompoundIndex(meta.TableName, meta.Settings.Indexes, params.Filter); index != "" {
+		selectClause += fmt.Sprintf(` INDEXED BY %q`, index)
+	}
+
+	// Same pushdown as Query — top-level equality conditions
+	// (superset semantics; the Go filter stays authoritative).
+	whereClause, args := prepareWhereClause(params.Filter)
+	filterPushdown := whereClause != ""
+
+	orderByClause := prepareOrderByClause(params.Sort)
+	sortPushdown := orderByClause != ""
+
+	q := `EXPLAIN QUERY PLAN ` + selectClause + whereClause + orderByClause
+
+	var limitPushdown bool
+
+	if params.Limit != 0 {
+		q += ` LIMIT ?`
+		args = append(args, params.Limit)
+		limitPushdown = true
+	}
+
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	defer rows.Close()
+
+	queryPlan, err := types.NewArray()
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	for rows.Next() {
+		var id int32
+		var parent int32
+		var notused int32
+		var detail string
+
+		// SQLite query plan can be interpreted as a tree.
+		// Each row of query plan represents a node of this tree,
+		// it contains node id, parent id, auxiliary integer field, and a description.
+		// See https://www.sqlite.org/eqp.html for further details.
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			return nil, lazyerrors.Error(err)
+		}
+
+		queryPlan.Append(fmt.Sprintf("id=%d parent=%d notused=%d detail=%s", id, parent, notused, detail))
+	}
+
+	return &backends.ExplainResult{
+		QueryPlanner:   must.NotFail(types.NewDocument("Plan", queryPlan)),
+		FilterPushdown: filterPushdown,
+		SortPushdown:   sortPushdown,
+		LimitPushdown:  limitPushdown,
+	}, nil
+}
+
+// Stats implements backends.Collection interface.
+func (c *collection) Stats(ctx context.Context, params *backends.CollectionStatsParams) (*backends.CollectionStatsResult, error) {
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil {
+		return nil, backends.NewError(
+			backends.ErrorCodeCollectionDoesNotExist,
+			lazyerrors.Errorf("no ns %s.%s", c.dbName, c.name),
+		)
+	}
+
+	coll := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if coll == nil {
+		return nil, backends.NewError(
+			backends.ErrorCodeCollectionDoesNotExist,
+			lazyerrors.Errorf("no ns %s.%s", c.dbName, c.name),
+		)
+	}
+	stats, err := collectionsStats(ctx, db, []*metadata.Collection{coll}, params.Refresh)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	placeholders := make([]string, 0, len(coll.Settings.Indexes))
+	args := make([]any, 0, len(coll.Settings.Indexes))
+	indexMap := map[string]string{}
+
+	for _, index := range coll.Settings.Indexes {
+		placeholders = append(placeholders, "?")
+		args = append(args, coll.TableName+"_"+index.Name)
+		indexMap[coll.TableName+"_"+index.Name] = index.Name
+	}
+
+	q := fmt.Sprintf(`
+		SELECT
+			name,
+			pgsize
+		FROM dbstat
+		WHERE name IN (%s) AND aggregate = TRUE`,
+		strings.Join(placeholders, ", "),
+	)
+
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	defer rows.Close()
+
+	indexSizes := make([]backends.IndexSize, len(indexMap))
+	var i int
+
+	for rows.Next() {
+		var name string
+		var size int64
+
+		if err = rows.Scan(&name, &size); err != nil {
+			return nil, lazyerrors.Error(err)
+		}
+
+		indexName, ok := indexMap[name]
+		if !ok {
+			// new index have been created since fetching metadata
+			continue
+		}
+
+		indexSizes[i] = backends.IndexSize{
+			Name: indexName,
+			Size: size,
+		}
+		i++
+	}
+
+	if rows.Err() != nil {
+		return nil, lazyerrors.Error(rows.Err())
+	}
+
+	return &backends.CollectionStatsResult{
+		CountDocuments:  stats.countDocuments,
+		SizeTotal:       stats.sizeTables + stats.sizeIndexes,
+		SizeIndexes:     stats.sizeIndexes,
+		SizeCollection:  stats.sizeTables,
+		IndexSizes:      indexSizes,
+		SizeFreeStorage: stats.sizeFreeStorage,
+	}, nil
+}
+
+// Compact implements backends.Collection interface.
+func (c *collection) Compact(ctx context.Context, params *backends.CompactParams) (*backends.CompactResult, error) {
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil {
+		return nil, backends.NewError(
+			backends.ErrorCodeDatabaseDoesNotExist,
+			lazyerrors.Errorf("no ns %s.%s", c.dbName, c.name),
+		)
+	}
+
+	coll := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if coll == nil {
+		return nil, backends.NewError(
+			backends.ErrorCodeCollectionDoesNotExist,
+			lazyerrors.Errorf("no ns %s.%s", c.dbName, c.name),
+		)
+	}
+
+	q := `PRAGMA incremental_vacuum`
+	if params != nil && params.Full {
+		q = `VACUUM`
+	}
+
+	if _, err := db.ExecContext(ctx, q); err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	return new(backends.CompactResult), nil
+}
+
+// ListIndexes implements backends.Collection interface.
+func (c *collection) ListIndexes(ctx context.Context, params *backends.ListIndexesParams) (*backends.ListIndexesResult, error) {
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil {
+		return nil, backends.NewError(
+			backends.ErrorCodeCollectionDoesNotExist,
+			lazyerrors.Errorf("no ns %s.%s", c.dbName, c.name),
+		)
+	}
+
+	coll := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if coll == nil {
+		return nil, backends.NewError(
+			backends.ErrorCodeCollectionDoesNotExist,
+			lazyerrors.Errorf("no ns %s.%s", c.dbName, c.name),
+		)
+	}
+
+	res := backends.ListIndexesResult{
+		Indexes: make([]backends.IndexInfo, len(coll.Settings.Indexes)),
+	}
+
+	for i, index := range coll.Settings.Indexes {
+		res.Indexes[i] = backends.IndexInfo{
+			Name:                 index.Name,
+			Unique:               index.Unique,
+			ExpireAfterSeconds:   index.ExpireAfterSeconds,
+			Hidden:               index.Hidden,
+			Sphere2DIndexVersion: index.Sphere2DIndexVersion,
+			Key:                  make([]backends.IndexKeyPair, len(index.Key)),
+		}
+
+		if index.TextOptions != nil {
+			res.Indexes[i].TextOptions = &backends.TextIndexOptions{
+				Weights:          index.TextOptions.Weights,
+				DefaultLanguage:  index.TextOptions.DefaultLanguage,
+				LanguageOverride: index.TextOptions.LanguageOverride,
+				TextIndexVersion: index.TextOptions.TextIndexVersion,
+			}
+		}
+
+		if index.Collation != nil {
+			collation, err := sjson.Unmarshal(index.Collation)
+			if err != nil {
+				return nil, lazyerrors.Error(err)
+			}
+
+			res.Indexes[i].Collation = collation
+		}
+
+		if index.PartialFilterExpression != nil {
+			filter, err := sjson.Unmarshal(index.PartialFilterExpression)
+			if err != nil {
+				return nil, lazyerrors.Error(err)
+			}
+
+			res.Indexes[i].PartialFilterExpression = filter
+		}
+
+		for j, key := range index.Key {
+			res.Indexes[i].Key[j] = backends.IndexKeyPair{
+				Field:      key.Field,
+				Descending: key.Descending,
+				Text:       key.Text,
+				Sphere2D:   key.Sphere2D,
+			}
+		}
+	}
+
+	sort.Slice(res.Indexes, func(i, j int) bool {
+		return res.Indexes[i].Name < res.Indexes[j].Name
+	})
+
+	return &res, nil
+}
+
+// CreateIndexes implements backends.Collection interface.
+func (c *collection) CreateIndexes(ctx context.Context, params *backends.CreateIndexesParams) (*backends.CreateIndexesResult, error) { //nolint:lll // for readability
+	indexes := make([]metadata.IndexInfo, len(params.Indexes))
+	for i, index := range params.Indexes {
+		indexes[i] = metadata.IndexInfo{
+			Name:                 index.Name,
+			Key:                  make([]metadata.IndexKeyPair, len(index.Key)),
+			ExpireAfterSeconds:   index.ExpireAfterSeconds,
+			Unique:               index.Unique,
+			Hidden:               index.Hidden,
+			Sphere2DIndexVersion: index.Sphere2DIndexVersion,
+		}
+
+		if index.TextOptions != nil {
+			indexes[i].TextOptions = &metadata.TextIndexOptions{
+				Weights:          index.TextOptions.Weights,
+				DefaultLanguage:  index.TextOptions.DefaultLanguage,
+				LanguageOverride: index.TextOptions.LanguageOverride,
+				TextIndexVersion: index.TextOptions.TextIndexVersion,
+			}
+		}
+
+		if index.Collation != nil {
+			b, err := sjson.Marshal(index.Collation)
+			if err != nil {
+				return nil, lazyerrors.Error(err)
+			}
+
+			indexes[i].Collation = b
+		}
+
+		if index.PartialFilterExpression != nil {
+			b, err := sjson.Marshal(index.PartialFilterExpression)
+			if err != nil {
+				return nil, lazyerrors.Error(err)
+			}
+
+			indexes[i].PartialFilterExpression = b
+		}
+
+		for j, key := range index.Key {
+			indexes[i].Key[j] = metadata.IndexKeyPair{
+				Field:      key.Field,
+				Descending: key.Descending,
+				Text:       key.Text,
+				Sphere2D:   key.Sphere2D,
+			}
+		}
+	}
+
+	err := c.r.IndexesCreate(ctx, c.dbName, c.name, indexes)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	return new(backends.CreateIndexesResult), nil
+}
+
+// DropIndexes implements backends.Collection interface.
+func (c *collection) DropIndexes(ctx context.Context, params *backends.DropIndexesParams) (*backends.DropIndexesResult, error) {
+	err := c.r.IndexesDrop(ctx, c.dbName, c.name, params.Indexes)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	return new(backends.DropIndexesResult), nil
+}
+
+// check interfaces
+var (
+	_ backends.Collection = (*collection)(nil)
+)

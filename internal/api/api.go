@@ -54,7 +54,7 @@ type loginToken struct {
 type user struct {
 	ID       string `bson:"_id"`
 	IsAdmin  bool   `bson:"isAdmin"`
-	Disabled bool   `bson:"loginDisabled"`
+	Disabled any    `bson:"loginDisabled"`
 	Method   string `bson:"authenticationMethod"`
 	Services struct {
 		Password struct {
@@ -64,9 +64,10 @@ type user struct {
 		Resume struct {
 			Tokens []loginToken `bson:"loginTokens"`
 		} `bson:"resume"`
-		Email     bson.M         `bson:"email"`
-		TwoFactor bson.M         `bson:"twoFactorAuthentication"`
-		Other     map[string]any `bson:",inline"`
+		SecurityBlock any            `bson:"securityBlock"`
+		Email         bson.M         `bson:"email"`
+		TwoFactor     bson.M         `bson:"twoFactorAuthentication"`
+		Other         map[string]any `bson:",inline"`
 	} `bson:"services"`
 }
 
@@ -153,7 +154,7 @@ func (s *service) authenticate(r *http.Request) (*user, string, error) {
 	if err := s.db.Collection("users").FindOne(r.Context(), bson.M{"services.resume.loginTokens.hashedToken": hash}).Decode(&u); err != nil {
 		return nil, "", err
 	}
-	if u.Disabled || u.ID == "" {
+	if loginDisabled(u.Disabled) || u.ID == "" {
 		return nil, "", errors.New("unauthorized")
 	}
 	now := time.Now()
@@ -314,7 +315,7 @@ func (s *service) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	u, err := s.findLoginUser(r.Context(), username, email, eok)
-	local := err == nil && !u.Disabled && (u.Method == "" || u.Method == "password") && u.Services.TwoFactor == nil && len(u.Services.Other) == 0 && u.Services.Password.Bcrypt != "" && u.Services.Password.Argon2 == ""
+	local := err == nil && !loginDisabled(u.Disabled) && (u.Method == "" || u.Method == "password") && u.Services.TwoFactor == nil && len(u.Services.Other) == 0 && u.Services.Password.Bcrypt != "" && u.Services.Password.Argon2 == ""
 	hash := s.dummy
 	if local {
 		hash = []byte(u.Services.Password.Bcrypt)
@@ -333,12 +334,12 @@ func (s *service) login(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	// Recheck account policy with the password hash atomically when issuing the
 	// token, so a concurrent disable, LDAP switch or 2FA enable cannot be bypassed.
-	selector := bson.M{"_id": u.ID, "loginDisabled": bson.M{"$ne": true}, "services.password.bcrypt": u.Services.Password.Bcrypt, "services.password.argon2": bson.M{"$exists": false}, "services.twoFactorAuthentication": bson.M{"$exists": false}, "authenticationMethod": u.Method}
+	selector := bson.M{"_id": u.ID, "loginDisabled": u.Disabled, "services.password.bcrypt": u.Services.Password.Bcrypt, "services.password.argon2": bson.M{"$exists": false}, "services.twoFactorAuthentication": bson.M{"$exists": false}, "authenticationMethod": u.Method}
 	if u.Method == "" {
 		delete(selector, "authenticationMethod")
 		selector["$or"] = bson.A{bson.M{"authenticationMethod": ""}, bson.M{"authenticationMethod": bson.M{"$exists": false}}}
 	}
-	result, err := s.db.Collection("users").UpdateOne(r.Context(), selector, bson.M{"$push": bson.M{"services.resume.loginTokens": bson.M{"hashedToken": tokenHash(token), "when": now}}})
+	result, err := s.db.Collection("users").UpdateOne(r.Context(), selector, bson.M{"$addToSet": bson.M{"services.resume.loginTokens": bson.M{"hashedToken": tokenHash(token), "when": now}}})
 	if err != nil {
 		failure(w, 500, "InternalServerError", "Internal server error")
 		return

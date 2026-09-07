@@ -1,0 +1,802 @@
+// Copyright 2021 FerretDB Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package metadata
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/exp/maps"
+
+	"github.com/FerretDB/FerretDB/internal/backends"
+	"github.com/FerretDB/FerretDB/internal/backends/sqlite/metadata/pool"
+	"github.com/FerretDB/FerretDB/internal/util/fsql"
+	"github.com/FerretDB/FerretDB/internal/util/lazyerrors"
+	"github.com/FerretDB/FerretDB/internal/util/must"
+	"github.com/FerretDB/FerretDB/internal/util/state"
+)
+
+const (
+	// This prefix is reserved by SQLite for internal use,
+	// see https://www.sqlite.org/lang_createtable.html.
+	reservedTablePrefix = "sqlite_"
+
+	// SQLite table name where FerretDB metadata is stored.
+	metadataTableName = backends.ReservedPrefix + "collections"
+)
+
+// Parts of Prometheus metric names.
+const (
+	namespace = "ferretdb"
+	subsystem = "sqlite_metadata"
+)
+
+// Registry provides access to SQLite databases and collections information.
+//
+// Exported methods are safe for concurrent use. Unexported methods are not.
+type Registry struct {
+	p         *pool.Pool
+	l         *slog.Logger
+	BatchSize int
+
+	// rw protects colls but also acts like a global lock for the whole registry.
+	// The latter effectively replaces transactions (see the sqlite backend package description for more info).
+	// One global lock should be replaced by more granular locks – one per database or even one per collection.
+	// But that requires some redesign.
+	// TODO https://github.com/FerretDB/FerretDB/issues/2755
+	rw    sync.RWMutex
+	colls map[string]map[string]*Collection // database name -> collection name -> collection
+}
+
+// NewRegistry creates a registry for SQLite databases in the directory specified by SQLite URI.
+func NewRegistry(u string, batchSize int, l *slog.Logger, sp *state.Provider) (*Registry, error) {
+	p, initDBs, err := pool.New(u, l, sp)
+	if err != nil {
+		return nil, err
+	}
+
+	r := &Registry{
+		p:         p,
+		l:         l,
+		BatchSize: batchSize,
+		colls:     map[string]map[string]*Collection{},
+	}
+
+	for name, db := range initDBs {
+		if err = r.initCollections(context.Background(), name, db); err != nil {
+			r.Close()
+			return nil, lazyerrors.Error(err)
+		}
+	}
+	if err = r.upgradeIndexFormats(context.Background(), initDBs); err != nil {
+		r.Close()
+		return nil, lazyerrors.Error(err)
+	}
+
+	return r, nil
+}
+
+// Close closes the registry.
+func (r *Registry) Close() {
+	r.p.Close()
+}
+
+// Logger returns the backend logger for bounded operational diagnostics.
+// Callers must never attach document values or credentials to it.
+func (r *Registry) Logger() *slog.Logger {
+	return r.l
+}
+
+// initCollections loads collections metadata from the database during initialization.
+func (r *Registry) initCollections(ctx context.Context, dbName string, db *fsql.DB) error {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT name, table_name, settings FROM %q", metadataTableName))
+	if err != nil {
+		return lazyerrors.Error(err)
+	}
+	defer rows.Close()
+
+	colls := map[string]*Collection{}
+
+	for rows.Next() {
+		var c Collection
+		if err = rows.Scan(&c.Name, &c.TableName, &c.Settings); err != nil {
+			return lazyerrors.Error(err)
+		}
+
+		colls[c.Name] = &c
+	}
+
+	if err = rows.Err(); err != nil {
+		return lazyerrors.Error(err)
+	}
+	if err = rows.Close(); err != nil {
+		return lazyerrors.Error(err)
+	}
+
+	r.colls[dbName] = colls
+
+	return nil
+}
+
+type indexUpgradeProgress struct {
+	Phase      string    `json:"phase"`
+	Database   string    `json:"database,omitempty"`
+	Collection string    `json:"collection,omitempty"`
+	Index      string    `json:"index,omitempty"`
+	Step       int       `json:"step"`
+	Total      int       `json:"total"`
+	StartedAt  time.Time `json:"startedAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+func (r *Registry) writeIndexUpgradeProgress(progress indexUpgradeProgress) {
+	path := os.Getenv("FERRETDB_INDEX_MIGRATION_STATUS_FILE")
+	if path == "" {
+		return
+	}
+	progress.UpdatedAt = time.Now()
+	b, err := json.Marshal(progress)
+	if err != nil {
+		return
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err = os.WriteFile(tmp, append(b, '\n'), 0o600); err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		r.l.Warn("Failed to write index migration progress", slog.Any("error", err))
+	}
+}
+
+func (r *Registry) upgradeIndexFormats(ctx context.Context, dbs map[string]*fsql.DB) error {
+	total := 0
+	for dbName, colls := range r.colls {
+		if dbs[dbName] == nil {
+			continue
+		}
+		for _, c := range colls {
+			if c.Settings.IndexFormat >= CurrentIndexFormat {
+				continue
+			}
+			for _, index := range c.Settings.Indexes {
+				if coveringDistinctIndex(index) {
+					total++
+				}
+			}
+		}
+	}
+	progress := &indexUpgradeProgress{Phase: "running", Total: total, StartedAt: time.Now()}
+	r.writeIndexUpgradeProgress(*progress)
+
+	dbNames := maps.Keys(r.colls)
+	slices.Sort(dbNames)
+	for _, dbName := range dbNames {
+		if dbs[dbName] == nil {
+			continue
+		}
+		collNames := maps.Keys(r.colls[dbName])
+		slices.Sort(collNames)
+		for _, collName := range collNames {
+			if err := r.upgradeIndexFormat(ctx, dbName, dbs[dbName], r.colls[dbName][collName], progress); err != nil {
+				progress.Phase = "error"
+				r.writeIndexUpgradeProgress(*progress)
+				return lazyerrors.Error(err)
+			}
+		}
+	}
+	progress.Phase = "complete"
+	progress.Database, progress.Collection, progress.Index = "", "", ""
+	r.writeIndexUpgradeProgress(*progress)
+	return nil
+}
+
+// upgradeIndexFormat rebuilds eligible indexes once so distinct can obtain a
+// value and its BSON schema from the index alone. The schema is appended after
+// the logical key, retaining the original value prefix for ordinary lookups.
+func (r *Registry) upgradeIndexFormat(
+	ctx context.Context,
+	dbName string,
+	db *fsql.DB,
+	c *Collection,
+	progress *indexUpgradeProgress,
+) error {
+	if c.Settings.IndexFormat >= CurrentIndexFormat {
+		return nil
+	}
+
+	r.l.InfoContext(ctx, "Upgrading SQLite indexes for covering distinct scans",
+		slog.String("collection", c.Name),
+	)
+
+	err := db.InTransaction(ctx, func(tx *fsql.Tx) error {
+		for _, index := range c.Settings.Indexes {
+			if !coveringDistinctIndex(index) {
+				continue
+			}
+			progress.Database = dbName
+			progress.Collection = c.Name
+			progress.Index = index.Name
+			r.writeIndexUpgradeProgress(*progress)
+
+			name := c.TableName + "_" + index.Name
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DROP INDEX IF EXISTS %q`, name)); err != nil {
+				return lazyerrors.Error(err)
+			}
+			if _, err := tx.ExecContext(ctx, indexCreateSQL(c.TableName, index)); err != nil {
+				return lazyerrors.Error(err)
+			}
+			progress.Step++
+			r.writeIndexUpgradeProgress(*progress)
+		}
+
+		c.Settings.IndexFormat = CurrentIndexFormat
+		q := fmt.Sprintf("UPDATE %q SET settings = ? WHERE table_name = ?", metadataTableName)
+		if _, err := tx.ExecContext(ctx, q, c.Settings, c.TableName); err != nil {
+			return lazyerrors.Error(err)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return lazyerrors.Error(err)
+	}
+	return nil
+}
+
+func coveringDistinctIndex(index IndexInfo) bool {
+	if index.Unique || len(index.Key) == 0 {
+		return false
+	}
+	for _, key := range index.Key {
+		if strings.Contains(key.Field, ".") {
+			return false
+		}
+	}
+	return true
+}
+
+func indexCreateSQL(table string, index IndexInfo) string {
+	q := "CREATE "
+	if index.Unique {
+		q += "UNIQUE "
+	}
+	q += "INDEX IF NOT EXISTS %q ON %q (%s)"
+
+	columns := make([]string, len(index.Key))
+	for i, key := range index.Key {
+		fields := strings.Split(key.Field, ".")
+		for j, f := range fields {
+			fields[j] = fmt.Sprintf("%q", f)
+		}
+
+		columns[i] = fmt.Sprintf("%s->%s", DefaultColumn, strings.Join(fields, "->"))
+		if key.Descending {
+			columns[i] += " DESC"
+		}
+	}
+	if coveringDistinctIndex(index) {
+		for _, key := range index.Key {
+			columns = append(columns, SchemaPathExpr(key.Field))
+		}
+	}
+
+	return fmt.Sprintf(q, table+"_"+index.Name, table, strings.Join(columns, ", "))
+}
+
+// DatabaseList returns a sorted list of existing databases.
+func (r *Registry) DatabaseList(ctx context.Context) []string {
+	return r.p.List(ctx)
+}
+
+// DatabaseGetExisting returns a connection to existing database or nil if it doesn't exist.
+func (r *Registry) DatabaseGetExisting(ctx context.Context, dbName string) *fsql.DB {
+	return r.p.GetExisting(ctx, dbName)
+}
+
+// DatabaseGetOrCreate returns a connection to existing database or newly created database.
+func (r *Registry) DatabaseGetOrCreate(ctx context.Context, dbName string) (*fsql.DB, error) {
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
+	return r.databaseGetOrCreate(ctx, dbName)
+}
+
+// databaseGetOrCreate returns a connection to existing database or newly created database.
+//
+// It does not hold the lock.
+func (r *Registry) databaseGetOrCreate(ctx context.Context, dbName string) (*fsql.DB, error) {
+	db, created, err := r.p.GetOrCreate(ctx, dbName)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	if !created {
+		return db, nil
+	}
+
+	q := fmt.Sprintf(
+		"CREATE TABLE %q ("+
+			"name TEXT NOT NULL UNIQUE CHECK(name != ''), "+
+			"table_name TEXT NOT NULL UNIQUE CHECK(table_name != ''), "+
+			"settings TEXT NOT NULL CHECK(settings != '')"+
+			") STRICT",
+		metadataTableName,
+	)
+	if _, err = db.ExecContext(ctx, q); err != nil {
+		r.databaseDrop(ctx, dbName)
+		return nil, lazyerrors.Error(err)
+	}
+
+	return db, nil
+}
+
+// DatabaseDrop drops the database.
+//
+// Returned boolean value indicates whether the database was dropped.
+func (r *Registry) DatabaseDrop(ctx context.Context, dbName string) bool {
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
+	return r.databaseDrop(ctx, dbName)
+}
+
+// databaseDrop drops the database.
+//
+// Returned boolean value indicates whether the database was dropped.
+//
+// It does not hold the lock.
+func (r *Registry) databaseDrop(ctx context.Context, dbName string) bool {
+	delete(r.colls, dbName)
+
+	return r.p.Drop(ctx, dbName)
+}
+
+// CollectionList returns a sorted copy of collections in the database.
+//
+// If database does not exist, no error is returned.
+func (r *Registry) CollectionList(ctx context.Context, dbName string) ([]*Collection, error) {
+	db := r.DatabaseGetExisting(ctx, dbName)
+	if db == nil {
+		return nil, nil
+	}
+
+	r.rw.RLock()
+
+	res := make([]*Collection, 0, len(r.colls[dbName]))
+	for _, c := range r.colls[dbName] {
+		res = append(res, c.deepCopy())
+	}
+
+	r.rw.RUnlock()
+
+	sort.Slice(res, func(i, j int) bool { return res[i].Name < res[j].Name })
+	return res, nil
+}
+
+// CollectionCreateParams contains parameters for CollectionCreate.
+type CollectionCreateParams struct {
+	DBName          string
+	Name            string
+	CappedSize      int64
+	CappedDocuments int64
+	_               struct{} // prevent unkeyed literals
+}
+
+// Capped returns true if capped collection creation is requested.
+func (ccp *CollectionCreateParams) Capped() bool {
+	return ccp.CappedSize > 0 // TODO https://github.com/FerretDB/FerretDB/issues/3631
+}
+
+// CollectionCreate creates a collection in the database.
+// Database will be created automatically if needed.
+//
+// Returned boolean value indicates whether the collection was created.
+// If collection already exists, (false, nil) is returned.
+func (r *Registry) CollectionCreate(ctx context.Context, params *CollectionCreateParams) (bool, error) {
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
+	return r.collectionCreate(ctx, params)
+}
+
+// collectionCreate creates a collection in the database.
+// Database will be created automatically if needed.
+//
+// Returned boolean value indicates whether the collection was created.
+// If collection already exists, (false, nil) is returned.
+//
+// It does not hold the lock.
+func (r *Registry) collectionCreate(ctx context.Context, params *CollectionCreateParams) (bool, error) {
+	dbName, collectionName := params.DBName, params.Name
+
+	db, err := r.databaseGetOrCreate(ctx, dbName)
+	if err != nil {
+		return false, lazyerrors.Error(err)
+	}
+
+	colls := r.colls[dbName]
+	if colls != nil && colls[collectionName] != nil {
+		return false, nil
+	}
+
+	h := fnv.New32a()
+	must.NotFail(h.Write([]byte(collectionName)))
+	s := h.Sum32()
+
+	var tableName string
+	list := maps.Values(colls)
+
+	for {
+		tableName = fmt.Sprintf("%s_%08x", strings.ToLower(collectionName), s)
+		if strings.HasPrefix(tableName, reservedTablePrefix) {
+			tableName = "_" + tableName
+		}
+
+		if !slices.ContainsFunc(list, func(c *Collection) bool { return c.TableName == tableName }) {
+			break
+		}
+
+		// table already exists, generate a new table name by incrementing the hash
+		s++
+	}
+
+	// Adopt an existing physical table instead of failing on it.
+	// The collision loop above only checks the IN-MEMORY metadata, and the table
+	// name is a deterministic hash of the collection name, so a table can exist on
+	// disk while its metadata row is absent — an ORPHAN left by an interrupted
+	// migration or a crash. A plain "CREATE TABLE" then failed with
+	// `table "<db>.<coll>_<hash>" already exists`, and because this runs from an
+	// upsert (msg_update.go updateDocument -> CreateCollection) the error surfaced
+	// as an unhandled rejection in the client's scheduler, which crash-looped the whole
+	// server so its web port never stayed open. IF NOT EXISTS re-adopts the orphan
+	// (same collection, same deterministic table) and the metadata INSERT below
+	// re-registers it, so startup self-heals instead of crashing.
+	q := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %q (", tableName)
+
+	if params.Capped() {
+		q += fmt.Sprintf("%s INTEGER PRIMARY KEY, ", RecordIDColumn)
+	}
+
+	q += fmt.Sprintf("%[1]s TEXT NOT NULL CHECK(%[1]s != '')) STRICT", DefaultColumn)
+
+	if _, err = db.ExecContext(ctx, q); err != nil {
+		return false, lazyerrors.Error(err)
+	}
+
+	q = fmt.Sprintf("INSERT INTO %q (name, table_name, settings) VALUES (?, ?, ?)", metadataTableName)
+	if _, err = db.ExecContext(ctx, q, collectionName, tableName, "{}"); err != nil {
+		_, _ = db.ExecContext(ctx, fmt.Sprintf("DROP TABLE %q", tableName))
+		return false, lazyerrors.Error(err)
+	}
+
+	if r.colls[dbName] == nil {
+		r.colls[dbName] = map[string]*Collection{}
+	}
+	r.colls[dbName][collectionName] = &Collection{
+		Name:      collectionName,
+		TableName: tableName,
+		Settings: Settings{
+			UUID:            uuid.NewString(),
+			CappedSize:      params.CappedSize,
+			CappedDocuments: params.CappedDocuments,
+			IndexFormat:     CurrentIndexFormat,
+		},
+	}
+
+	err = r.indexesCreate(ctx, dbName, collectionName, []IndexInfo{{
+		Name:   backends.DefaultIndexName,
+		Key:    []IndexKeyPair{{Field: "_id"}},
+		Unique: true,
+	}})
+	if err != nil {
+		_, _ = r.collectionDrop(ctx, dbName, collectionName)
+		return false, lazyerrors.Error(err)
+	}
+
+	// The capped oplog (local.oplog.rs) is tailed with a {ts: {$gt: <last>}} cursor
+	// — a Timestamp range that query.go pushes down as a numeric ->> comparison.
+	// Add a matching expression index on exactly that value, so an idle tail
+	// resumes with an index range scan instead of re-scanning the whole capped
+	// collection on every awaitData poll. Internal optimization (not a
+	// client-visible index) and best-effort: on failure the tail still works via a
+	// scan, so it never blocks collection creation. The expression must match
+	// query.go's range expression byte-for-byte for SQLite to use the index.
+	if dbName == "local" && collectionName == "oplog.rs" {
+		idxQ := fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS %q ON %q (%s->>"ts")`,
+			tableName+"_ts", tableName, DefaultColumn,
+		)
+		if _, err = db.ExecContext(ctx, idxQ); err != nil {
+			r.l.WarnContext(ctx, "Failed to create oplog ts index", slog.Any("error", err))
+		}
+	}
+
+	return true, nil
+}
+
+// CollectionGet returns a copy of collection metadata.
+// It can be safely modified by a caller.
+//
+// If database or collection does not exist, nil is returned.
+func (r *Registry) CollectionGet(ctx context.Context, dbName, collectionName string) *Collection {
+	r.rw.RLock()
+	defer r.rw.RUnlock()
+
+	return r.collectionGet(dbName, collectionName)
+}
+
+// collectionGet returns a copy of collection metadata.
+// It can be safely modified by a caller.
+//
+// If database or collection does not exist, nil is returned.
+//
+// It does not hold the lock.
+func (r *Registry) collectionGet(dbName, collectionName string) *Collection {
+	colls := r.colls[dbName]
+	if colls == nil {
+		return nil
+	}
+
+	return colls[collectionName].deepCopy()
+}
+
+// CollectionDrop drops a collection in the database.
+//
+// Returned boolean value indicates whether the collection was dropped.
+// If database or collection did not exist, (false, nil) is returned.
+func (r *Registry) CollectionDrop(ctx context.Context, dbName, collectionName string) (bool, error) {
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
+	return r.collectionDrop(ctx, dbName, collectionName)
+}
+
+// collectionDrop drops a collection in the database.
+//
+// Returned boolean value indicates whether the collection was dropped.
+// If database or collection did not exist, (false, nil) is returned.
+//
+// It does not hold the lock.
+func (r *Registry) collectionDrop(ctx context.Context, dbName, collectionName string) (bool, error) {
+	db := r.DatabaseGetExisting(ctx, dbName)
+	if db == nil {
+		return false, nil
+	}
+
+	c := r.collectionGet(dbName, collectionName)
+	if c == nil {
+		return false, nil
+	}
+
+	q := fmt.Sprintf("DELETE FROM %q WHERE name = ?", metadataTableName)
+	if _, err := db.ExecContext(ctx, q, collectionName); err != nil {
+		return false, lazyerrors.Error(err)
+	}
+
+	q = fmt.Sprintf("DROP TABLE %q", c.TableName)
+	if _, err := db.ExecContext(ctx, q); err != nil {
+		return false, lazyerrors.Error(err)
+	}
+
+	delete(r.colls[dbName], collectionName)
+
+	return true, nil
+}
+
+// CollectionRename renames a collection in the database.
+//
+// The collection name is updated, but original table name is kept.
+//
+// Returned boolean value indicates whether the collection was renamed.
+// If database or collection did not exist, (false, nil) is returned.
+func (r *Registry) CollectionRename(ctx context.Context, dbName, oldCollectionName, newCollectionName string) (bool, error) {
+	db := r.DatabaseGetExisting(ctx, dbName)
+	if db == nil {
+		return false, nil
+	}
+
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
+	c := r.collectionGet(dbName, oldCollectionName)
+	if c == nil {
+		return false, nil
+	}
+
+	q := fmt.Sprintf(`UPDATE %q SET name = ? WHERE table_name = ?`, metadataTableName)
+	if _, err := db.ExecContext(ctx, q, newCollectionName, c.TableName); err != nil {
+		return false, lazyerrors.Error(err)
+	}
+
+	c.Name = newCollectionName
+	r.colls[dbName][newCollectionName] = c
+	delete(r.colls[dbName], oldCollectionName)
+
+	return true, nil
+}
+
+// IndexesCreate creates indexes in the collection.
+//
+// Existing indexes with given names are ignored.
+func (r *Registry) IndexesCreate(ctx context.Context, dbName, collectionName string, indexes []IndexInfo) error {
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
+	return r.indexesCreate(ctx, dbName, collectionName, indexes)
+}
+
+// indexesCreate creates indexes in the collection.
+//
+// Existing indexes with given names are ignored.
+//
+// It does not hold the lock.
+func (r *Registry) indexesCreate(ctx context.Context, dbName, collectionName string, indexes []IndexInfo) error {
+	_, err := r.collectionCreate(ctx, &CollectionCreateParams{DBName: dbName, Name: collectionName})
+	if err != nil {
+		return lazyerrors.Error(err)
+	}
+
+	db := r.DatabaseGetExisting(ctx, dbName)
+	if db == nil {
+		panic("database does not exist")
+	}
+
+	c := r.collectionGet(dbName, collectionName)
+	if c == nil {
+		panic("collection does not exist")
+	}
+
+	created := make([]string, 0, len(indexes))
+
+	for _, index := range indexes {
+		if slices.ContainsFunc(c.Settings.Indexes, func(i IndexInfo) bool { return index.Name == i.Name }) {
+			continue
+		}
+
+		// IF NOT EXISTS so adopting an ORPHANED table (see
+		// collectionCreate) does not fail on an index that already exists on it —
+		// which otherwise rolled back and DROPPED the orphan (losing its data) and
+		// re-raised the error that crash-looped the client.
+		q := indexCreateSQL(c.TableName, index)
+
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			_ = r.indexesDrop(ctx, dbName, collectionName, created)
+			return lazyerrors.Error(err)
+		}
+
+		created = append(created, index.Name)
+		c.Settings.Indexes = append(c.Settings.Indexes, index)
+	}
+
+	q := fmt.Sprintf("UPDATE %q SET settings = ? WHERE table_name = ?", metadataTableName)
+	if _, err := db.ExecContext(ctx, q, c.Settings, c.TableName); err != nil {
+		_ = r.indexesDrop(ctx, dbName, collectionName, created)
+		return lazyerrors.Error(err)
+	}
+
+	r.colls[dbName][collectionName] = c
+
+	return nil
+}
+
+// IndexesDrop removes given connection's indexes.
+//
+// Non-existing indexes are ignored.
+//
+// If database or collection does not exist, nil is returned.
+func (r *Registry) IndexesDrop(ctx context.Context, dbName, collectionName string, indexNames []string) error {
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
+	return r.indexesDrop(ctx, dbName, collectionName, indexNames)
+}
+
+// indexesDrop removes given connection's indexes.
+//
+// Non-existing indexes are ignored.
+//
+// If database or collection does not exist, nil is returned.
+//
+// It does not hold the lock.
+func (r *Registry) indexesDrop(ctx context.Context, dbName, collectionName string, indexNames []string) error {
+	c := r.collectionGet(dbName, collectionName)
+	if c == nil {
+		return nil
+	}
+
+	db := r.DatabaseGetExisting(ctx, dbName)
+	if db == nil {
+		return nil
+	}
+
+	for _, name := range indexNames {
+		i := slices.IndexFunc(c.Settings.Indexes, func(i IndexInfo) bool { return name == i.Name })
+		if i < 0 {
+			continue
+		}
+
+		q := fmt.Sprintf("DROP INDEX %q", c.TableName+"_"+name)
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return lazyerrors.Error(err)
+		}
+
+		c.Settings.Indexes = slices.Delete(c.Settings.Indexes, i, i+1)
+	}
+
+	q := fmt.Sprintf("UPDATE %q SET settings = ? WHERE table_name = ?", metadataTableName)
+	if _, err := db.ExecContext(ctx, q, c.Settings, c.TableName); err != nil {
+		return lazyerrors.Error(err)
+	}
+
+	r.colls[dbName][collectionName] = c
+
+	return nil
+}
+
+// Describe implements prometheus.Collector.
+func (r *Registry) Describe(ch chan<- *prometheus.Desc) {
+	prometheus.DescribeByCollect(r, ch)
+}
+
+// Collect implements prometheus.Collector.
+func (r *Registry) Collect(ch chan<- prometheus.Metric) {
+	r.p.Collect(ch)
+
+	r.rw.RLock()
+	defer r.rw.RUnlock()
+
+	ch <- prometheus.MustNewConstMetric(
+		prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "databases"),
+			"The current number of database in the registry.",
+			nil, nil,
+		),
+		prometheus.GaugeValue,
+		float64(len(r.colls)),
+	)
+
+	for db, colls := range r.colls {
+		ch <- prometheus.MustNewConstMetric(
+			prometheus.NewDesc(
+				prometheus.BuildFQName(namespace, subsystem, "collections"),
+				"The current number of collections in the registry.",
+				[]string{"db"}, nil,
+			),
+			prometheus.GaugeValue,
+			float64(len(colls)),
+			db,
+		)
+	}
+}
+
+// check interfaces
+var (
+	_ prometheus.Collector = (*Registry)(nil)
+)

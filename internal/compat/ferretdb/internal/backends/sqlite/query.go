@@ -1,0 +1,964 @@
+// Copyright 2021 FerretDB Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package sqlite
+
+import (
+	"fmt"
+	"hash/fnv"
+	"math"
+	"strings"
+	"time"
+
+	"github.com/FerretDB/FerretDB/internal/backends/sqlite/metadata"
+	"github.com/FerretDB/FerretDB/internal/handler/sjson"
+	"github.com/FerretDB/FerretDB/internal/types"
+	"github.com/FerretDB/FerretDB/internal/util/must"
+)
+
+// prepareSelectClause returns SELECT clause for default column of provided table name.
+//
+// For capped collection with onlyRecordIDs, it returns select clause for recordID column.
+//
+// For capped collection, it returns select clause for recordID column and default column.
+func prepareSelectClause(table, comment string, capped, onlyRecordIDs bool) string {
+	if comment != "" {
+		comment = strings.ReplaceAll(comment, "/*", "/ *")
+		comment = strings.ReplaceAll(comment, "*/", "* /")
+		comment = `/* ` + comment + ` */`
+	}
+
+	if capped && onlyRecordIDs {
+		return fmt.Sprintf(`SELECT %s %s FROM %q`, comment, metadata.RecordIDColumn, table)
+	}
+
+	if capped {
+		return fmt.Sprintf(`SELECT %s %s, %s FROM %q`, comment, metadata.RecordIDColumn, metadata.DefaultColumn, table)
+	}
+
+	return fmt.Sprintf(`SELECT %s %s FROM %q`, comment, metadata.DefaultColumn, table)
+}
+
+// prepareDistinctSelectClause returns one minimal SJSON document for each
+// distinct combination of fields consumed by the command. The inner query
+// deduplicates raw schema/value pairs; only the unique rows pay for json_object
+// construction. Keeping filter fields in the document lets the handler re-apply
+// MongoDB semantics without receiving unrelated complete documents.
+func prepareDistinctSelectClause(table, comment string, fields []string, suffix string) string {
+	if comment != "" {
+		comment = strings.ReplaceAll(comment, "/*", "/ *")
+		comment = strings.ReplaceAll(comment, "*/", "* /")
+		comment = `/* ` + comment + ` */`
+	}
+
+	propertyArgs := make([]string, 0, len(fields)*2)
+	keyArgs := make([]string, 0, len(fields))
+	valueArgs := make([]string, 0, len(fields)*2)
+	innerArgs := make([]string, 0, len(fields)*2)
+	for i, field := range fields {
+		literal := `'` + strings.ReplaceAll(field, `'`, `''`) + `'`
+		expr := jsonPathExpr(field)
+		schemaExpr := metadata.SchemaPathExpr(field)
+		schemaAlias := fmt.Sprintf(`"s%d"`, i)
+		valueAlias := fmt.Sprintf(`"v%d"`, i)
+		// SQLite drops JSON's internal subtype at a subquery boundary. json(alias)
+		// restores it so json_object embeds the value instead of quoting its text.
+		propertyArgs = append(propertyArgs, literal, `json(`+schemaAlias+`)`)
+		keyArgs = append(keyArgs, literal)
+		valueArgs = append(valueArgs, literal, `json(`+valueAlias+`)`)
+		innerArgs = append(innerArgs, schemaExpr+` AS `+schemaAlias, expr+` AS `+valueAlias)
+	}
+
+	schema := `json_object('p',json_object(` + strings.Join(propertyArgs, `,`) +
+		`),'$k',json_array(` + strings.Join(keyArgs, `,`) + `))`
+	doc := `json_object('$s',` + schema + `,` + strings.Join(valueArgs, `,`) + `)`
+
+	return fmt.Sprintf(
+		`SELECT %s %s AS %s FROM (SELECT DISTINCT %s FROM %q%s)`,
+		comment, doc, metadata.DefaultColumn, strings.Join(innerArgs, `,`), table, suffix,
+	)
+}
+
+// pushdownSafeString reports whether Go's encoding/json (used by sjson when the
+// document was stored) and SQLite's -> operator (which re-renders the stored
+// JSON when we compare against it) produce byte-identical serializations of s,
+// making a parameterized comparison on the -> expression exact. Go escapes
+// '<', '>', '&', U+2028 and U+2029 as \uXXXX while SQLite renders them raw,
+// and control-character escapes can differ, so values containing any of those
+// are not pushed down (the in-Go filter still handles them correctly).
+func pushdownSafeString(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == '<' || r == '>' || r == '&' || r == '\u2028' || r == '\u2029' {
+			return false
+		}
+	}
+
+	return true
+}
+
+// pushdownSafeLiteralSubstring reports whether s can be pushed to SQLite as a
+// LIKE substring for a `$regex` filter (performance follow-up: "Filter by
+// card title"). It must be a plain, ASCII, case-fold-safe LITERAL:
+//   - non-empty and all ASCII: SQLite's LIKE folds case only for ASCII A-Z, so
+//     for an ASCII literal `LIKE` is a correct SUPERSET of a case-insensitive Go
+//     regex; a non-ASCII literal could make LIKE MISS a match the Go 'i' regex
+//     keeps (\u00e9/\u00c9), which would drop a card \u2014 never allowed.
+//   - no regex metacharacters (so the literal means itself, not a pattern), and
+//   - no LIKE wildcards `%`/`_` (so we need no ESCAPE clause), and
+//   - pushdownSafeString (so the -> JSON serialization is byte-identical).
+//
+// The Go filter still re-applies the real regex, so this only ever prunes rows
+// SQLite can prove cannot match \u2014 never the authority on what does.
+func pushdownSafeLiteralSubstring(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	for _, r := range s {
+		if r > 0x7f {
+			return false
+		}
+
+		switch r {
+		case '.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\', '%', '_':
+			return false
+		}
+	}
+
+	return pushdownSafeString(s)
+}
+
+// prepareWhereClause builds a WHERE clause selecting a SUPERSET of the documents
+// matching the given filter, from the filter's top-level string/ObjectID
+// equality conditions. Exact filtering still happens in Go afterwards
+// (common.FilterIterator re-applies the whole filter), so a superset is always
+// correct — but evaluating the cheap conditions inside SQLite avoids decoding
+// every document's sjson in Go, which was pinning the CPU on busy collections
+// (every {field: value} equality query decoded the whole collection).
+//
+// The expressions are built EXACTLY like Registry.indexesCreate builds its
+// expression indexes (_ferretdb_sjson->"field"), so SQLite can satisfy them from
+// an existing index: {_id: X} uses the unique _id index, and Mongo-level indexes
+// that the application declares accelerate their fields too.
+//
+// Because Mongo equality {f: "x"} also matches documents where f is an ARRAY
+// containing "x", each non-_id condition keeps array values with an
+// index-friendly range arm: array JSON renders as "[...", so expr >= '[' AND
+// expr < '\' selects exactly the arrays, and the Go filter decides which of
+// them actually match. _id can never be an array, so it uses plain equality.
+func prepareWhereClause(filter *types.Document) (string, []any) {
+	if filter == nil || filter.Len() == 0 {
+		return "", nil
+	}
+
+	var conds []string
+	var args []any
+	if cond, condArgs, _, ok := numericTypeNorRangeCondition(filter); ok {
+		conds = append(conds, cond)
+		args = append(args, condArgs...)
+	}
+
+	for _, k := range filter.Keys() {
+		if k == "" {
+			continue
+		}
+
+		// A top-level $-operator is not a field. Most stay in the Go filter, but
+		// $or and $and are worth pushing down when they can be: a selector whose only
+		// SELECTIVE terms sit inside one - a membership test ORed over several
+		// ways of belonging, say, beside a non-selective `archived = false` -
+		// otherwise produces a WHERE that narrows nothing, and every row is
+		// decoded and filtered in Go to return a handful.
+		if strings.HasPrefix(k, "$") {
+			switch k {
+			case "$or":
+				if cond, condArgs, ok := pushdownOrCondition(must.NotFail(filter.Get(k))); ok {
+					conds = append(conds, cond)
+					args = append(args, condArgs...)
+				}
+			case "$and":
+				if cond, condArgs, ok := pushdownAndCondition(must.NotFail(filter.Get(k))); ok {
+					conds = append(conds, cond)
+					args = append(args, condArgs...)
+				}
+			}
+
+			continue
+		}
+
+		v := must.NotFail(filter.Get(k))
+
+		// The same expression Registry.indexesCreate indexes. A DOTTED path becomes
+		// a nested -> chain (`col->"a"->"b"`), so SQLite can pair the WHERE with the
+		// nested expression index — e.g. a client's `{'meta.cardId': X}` attachment
+		// lookup, which otherwise dropped the WHERE and full-scanned the collection.
+		expr := jsonPathExpr(k)
+
+		var cond string
+		var condArgs []any
+		var ok bool
+		if strings.ContainsRune(k, '.') {
+			cond, condArgs, ok = pushdownDottedFieldCondition(expr, v)
+		} else {
+			cond, condArgs, ok = pushdownFieldCondition(expr, k, v)
+		}
+
+		if ok {
+			conds = append(conds, cond)
+			args = append(args, condArgs...)
+		}
+	}
+
+	if len(conds) == 0 {
+		return "", nil
+	}
+
+	return ` WHERE ` + strings.Join(conds, ` AND `), args
+}
+
+// numericTypeNorRangeCondition pushes the corruption-check shape
+//
+//	{field: {$type: "number"}, $nor: [{field: {$gte: low, $lte: high}}]}
+//
+// into SQLite. The negated numeric range is enough for a safe superset: a
+// string-encoded NaN and all strings/objects/arrays remain candidates, finite
+// JSON numbers are pruned, and missing/null values cannot satisfy $type number.
+// The Go filter remains authoritative for BSON types and array elements. Other
+// $nor shapes stay in Go.
+func numericTypeNorRangeCondition(filter *types.Document) (string, []any, string, bool) {
+	norAny, err := filter.Get("$nor")
+	if err != nil {
+		return "", nil, "", false
+	}
+	nor, ok := norAny.(*types.Array)
+	if !ok || nor.Len() != 1 {
+		return "", nil, "", false
+	}
+	branch, ok := must.NotFail(nor.Get(0)).(*types.Document)
+	if !ok || branch.Len() != 1 {
+		return "", nil, "", false
+	}
+	field := branch.Keys()[0]
+	if field == "" || strings.HasPrefix(field, "$") || strings.ContainsRune(field, '.') {
+		return "", nil, "", false
+	}
+
+	topAny, err := filter.Get(field)
+	if err != nil {
+		return "", nil, "", false
+	}
+	top, ok := topAny.(*types.Document)
+	if !ok {
+		return "", nil, "", false
+	}
+	typeValue, err := top.Get("$type")
+	if err != nil || typeValue != "number" {
+		return "", nil, "", false
+	}
+
+	rangeDoc, ok := must.NotFail(branch.Get(field)).(*types.Document)
+	if !ok || rangeDoc.Len() == 0 {
+		return "", nil, "", false
+	}
+	// Negating a partially pushed AND would create a subset and lose matches:
+	// NOT(range AND unsupported) is wider than NOT(range). Therefore every
+	// operator in this $nor branch must be a supported numeric range operator.
+	for _, key := range rangeDoc.Keys() {
+		switch key {
+		case "$gt", "$gte", "$lt", "$lte":
+			if _, ok := numericBound(must.NotFail(rangeDoc.Get(key))); !ok {
+				return "", nil, "", false
+			}
+		default:
+			return "", nil, "", false
+		}
+	}
+	scalarExpr := fmt.Sprintf(`%s->>%s`, metadata.DefaultColumn, quoteJSONLabel(field))
+	rangeCond, args, ok := rangeConditions(scalarExpr, rangeDoc)
+	if !ok {
+		return "", nil, "", false
+	}
+
+	return fmt.Sprintf(`(%[1]s IS NOT NULL AND NOT (%[2]s))`, scalarExpr, rangeCond), args, field, true
+}
+
+// preferredNumericRangeIndex returns a private physical index for a numeric
+// corruption-check field when that field is already part of a client-declared
+// index. A non-leading compound key cannot accelerate a field-only range in
+// SQLite, while scanning its extracted scalar expression is much cheaper than
+// parsing every complete JSON document. The hash keeps arbitrary client field
+// names out of SQLite identifiers.
+func preferredNumericRangeIndex(
+	table string,
+	indexes []metadata.IndexInfo,
+	filter *types.Document,
+) (string, string) {
+	_, _, field, ok := numericTypeNorRangeCondition(filter)
+	if !ok {
+		return "", ""
+	}
+	for _, index := range indexes {
+		if index.Hidden {
+			continue
+		}
+		for _, key := range index.Key {
+			if key.Field == field {
+				h := fnv.New64a()
+				_, _ = h.Write([]byte(field))
+				return fmt.Sprintf(`%s__ferretdb_numeric_%x`, table, h.Sum64()), field
+			}
+		}
+	}
+	return "", ""
+}
+
+// pushdownAndCondition pushes every usable branch of a top-level $and. Omitting
+// an unsupported conjunct only widens the SQL candidate set; the Go filter still
+// applies the complete selector, so this remains correct while allowing ordinary
+// client-generated $and wrappers to use the same indexes as flat selectors.
+func pushdownAndCondition(v any) (string, []any, bool) {
+	branches, ok := v.(*types.Array)
+	if !ok || branches.Len() == 0 {
+		return "", nil, false
+	}
+
+	var ands []string
+	var args []any
+	for i := 0; i < branches.Len(); i++ {
+		branch, ok := must.NotFail(branches.Get(i)).(*types.Document)
+		if !ok || branch.Len() == 0 {
+			continue
+		}
+
+		where, branchArgs := prepareWhereClause(branch)
+		if where == "" {
+			continue
+		}
+		ands = append(ands, `(`+strings.TrimPrefix(where, ` WHERE `)+`)`)
+		args = append(args, branchArgs...)
+	}
+
+	if len(ands) == 0 {
+		return "", nil, false
+	}
+
+	return `(` + strings.Join(ands, ` AND `) + `)`, args, true
+}
+
+// preferredCompoundIndex returns the physical SQLite index whose longest
+// leading run of keys is constrained by top-level fields in filter. SQLite's
+// JSON equality predicates include an array-containment fallback to preserve
+// MongoDB semantics; that OR can make SQLite choose a less selective single-key
+// index even when the application declared the exact compound index. INDEXED BY
+// keeps the superset predicate fully correct while making the declared compound
+// prefix the access path. Single-key matches are forced too: the Mongo-compatible
+// array arm (`expr = ? OR expr is an array`) otherwise makes SQLite choose a
+// table scan for small/restored statistics even when the exact expression index
+// exists. That turned `_id`, `meta.boardId` and one-element `$in` polling into
+// full collection decodes.
+func preferredCompoundIndex(
+	table string,
+	indexes []metadata.IndexInfo,
+	filter *types.Document,
+) string {
+	if filter == nil || filter.Len() == 0 {
+		return ""
+	}
+
+	fields := make(map[string]struct{}, filter.Len())
+	collectIndexedFields(filter, fields)
+
+	bestName := ""
+	bestPrefix := 0
+	bestWidth := int(^uint(0) >> 1)
+	for _, index := range indexes {
+		if index.Hidden || len(index.Key) == 0 {
+			continue
+		}
+
+		prefix := 0
+		for _, key := range index.Key {
+			if _, ok := fields[key.Field]; !ok {
+				break
+			}
+			prefix++
+		}
+
+		if prefix > bestPrefix || (prefix == bestPrefix && prefix > 0 && len(index.Key) < bestWidth) {
+			bestName = table + "_" + index.Name
+			bestPrefix = prefix
+			bestWidth = len(index.Key)
+		}
+	}
+
+	return bestName
+}
+
+// preferredDistinctIndex returns an existing index ordered by the distinct key.
+// SQLite can stream equal keys together instead of sorting the entire table.
+func preferredDistinctIndex(table string, indexes []metadata.IndexInfo, field string, decodeFields []string) string {
+	needed := make(map[string]struct{}, len(decodeFields))
+	for _, neededField := range decodeFields {
+		needed[neededField] = struct{}{}
+	}
+	best := ""
+	bestWidth := int(^uint(0) >> 1)
+	for _, index := range indexes {
+		if index.Hidden || !coveringIndexFields(index.Key, needed) {
+			continue
+		}
+		containsDistinct := false
+		for _, key := range index.Key {
+			containsDistinct = containsDistinct || key.Field == field
+		}
+		if containsDistinct && len(index.Key) < bestWidth {
+			best = table + "_" + index.Name
+			bestWidth = len(index.Key)
+		}
+	}
+	return best
+}
+
+func coveringIndexFields(keys []metadata.IndexKeyPair, needed map[string]struct{}) bool {
+	covered := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if strings.Contains(key.Field, ".") {
+			return false
+		}
+		covered[key.Field] = struct{}{}
+	}
+	for field := range needed {
+		if _, ok := covered[field]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func collectIndexedFields(filter *types.Document, fields map[string]struct{}) {
+	for _, key := range filter.Keys() {
+		if key == "$and" {
+			branches, ok := must.NotFail(filter.Get(key)).(*types.Array)
+			if !ok {
+				continue
+			}
+			for i := 0; i < branches.Len(); i++ {
+				if branch, ok := must.NotFail(branches.Get(i)).(*types.Document); ok {
+					collectIndexedFields(branch, fields)
+				}
+			}
+			continue
+		}
+		if key == "" || strings.HasPrefix(key, "$") {
+			continue
+		}
+
+		value := must.NotFail(filter.Get(key))
+		expr := jsonPathExpr(key)
+		var ok bool
+		if strings.ContainsRune(key, '.') {
+			_, _, ok = pushdownDottedFieldCondition(expr, value)
+		} else {
+			_, _, ok = pushdownFieldCondition(expr, key, value)
+		}
+		if ok {
+			fields[key] = struct{}{}
+		}
+	}
+}
+
+// pushdownOrCondition pushes down a top-level $or, but ONLY when every branch
+// can be pushed down.
+//
+// This is the one place the "superset" contract needs care. Every other pushdown
+// narrows: a condition that cannot be expressed is dropped, the WHERE returns
+// more rows than match, and the Go filter removes the rest. An OR is the
+// opposite - dropping one branch REMOVES rows that match it, and the Go filter
+// never sees them. So it is all or nothing: if a single branch is not
+// pushdown-able, the whole $or stays in Go, exactly as before.
+//
+// Each branch is a document of field conditions, ANDed together, and the
+// branches are ORed. A branch that is empty matches everything, which makes the
+// whole $or match everything - there is nothing to gain and it is refused.
+func pushdownOrCondition(v any) (string, []any, bool) {
+	branches, ok := v.(*types.Array)
+	if !ok || branches.Len() == 0 {
+		return "", nil, false
+	}
+
+	var ors []string
+	var args []any
+
+	for i := 0; i < branches.Len(); i++ {
+		branch, ok := must.NotFail(branches.Get(i)).(*types.Document)
+		if !ok || branch.Len() == 0 {
+			return "", nil, false
+		}
+
+		var ands []string
+
+		for _, k := range branch.Keys() {
+			// A nested operator inside a branch ($and, another $or, …) is not a
+			// field condition; refuse the whole $or rather than lose the branch.
+			if k == "" || strings.HasPrefix(k, "$") {
+				return "", nil, false
+			}
+			// A direct dotted JSON accessor only follows documents. Mongo dotted
+			// matching also traverses arrays of documents, so using that accessor
+			// inside an OR could discard a matching row before the Go filter sees
+			// it. Keep the entire OR in Go when any branch has a dotted path.
+			if strings.ContainsRune(k, '.') {
+				return "", nil, false
+			}
+
+			bv := must.NotFail(branch.Get(k))
+			expr := jsonPathExpr(k)
+
+			var cond string
+			var condArgs []any
+			var condOK bool
+
+			cond, condArgs, condOK = pushdownFieldCondition(expr, k, bv)
+
+			if !condOK {
+				return "", nil, false
+			}
+
+			ands = append(ands, cond)
+			args = append(args, condArgs...)
+		}
+
+		if len(ands) == 0 {
+			return "", nil, false
+		}
+
+		ors = append(ors, `(`+strings.Join(ands, ` AND `)+`)`)
+	}
+
+	return `(` + strings.Join(ors, ` OR `) + `)`, args, true
+}
+
+// pushdownFieldCondition returns a WHERE condition (and its args) selecting a
+// SUPERSET of the documents matching {key: v}, or ok=false when v cannot be
+// pushed down (the Go filter then stays the sole authority for that field).
+//
+// Handled: scalar string/ObjectID equality, {$exists: bool}, {$in: [...safe...]}
+// (an $in list filter), document-form {$elemMatch: {...}}, and {$regex: literal}
+// (a substring filter). Everything else — ranges ($gt/$lte/…, unsafe on
+// JSON-text ordering), $ne, non-ASCII or non-literal regex, unsafe values —
+// stays in Go.
+func pushdownFieldCondition(expr, key string, v any) (string, []any, bool) {
+	switch val := v.(type) {
+	case string:
+		if !pushdownSafeString(val) {
+			return "", nil, false
+		}
+
+		return equalityCondition(expr, key), []any{marshalPushdownValue(v)}, true
+
+	case types.ObjectID, bool:
+		// hex-encoded by sjson; always byte-identical in both serializations
+		return equalityCondition(expr, key), []any{marshalPushdownValue(v)}, true
+
+	case types.Regex:
+		return regexCondition(expr, val.Pattern, val.Options)
+
+	case *types.Document:
+		return operatorCondition(expr, key, val)
+
+	default:
+		return "", nil, false
+	}
+}
+
+// jsonPathExpr builds the DefaultColumn -> accessor for a (possibly dotted) field
+// key, EXACTLY like Registry.indexesCreate builds its expression index, so SQLite
+// can pair a WHERE on the key with that index: "a" -> `col->"a"`, "a.b" ->
+// `col->"a"->"b"`.
+func jsonPathExpr(key string) string {
+	segments := strings.Split(key, ".")
+	for i, s := range segments {
+		segments[i] = quoteJSONLabel(s)
+	}
+
+	return fmt.Sprintf(`%s->%s`, metadata.DefaultColumn, strings.Join(segments, "->"))
+}
+
+// pushdownDottedFieldCondition pushes down a DOTTED-path field (e.g. "meta.cardId")
+// for scalar string/ObjectID equality and {$in: [...]} only — the conditions whose
+// SQL references ONLY `expr` (the nested -> chain that matches the expression index
+// Registry.indexesCreate builds for a dotted key). Range ($gt/…) and $regex on a
+// dotted path build a scalar ->> on the raw key, which is not a valid nested JSON
+// path, so they stay in the Go filter. `expr` is the nested chain; the key is passed
+// as "" so equality/inCondition use their non-_id (array-containment) form — a dotted
+// path is never _id. Still a SUPERSET, so the Go filter stays authoritative.
+func pushdownDottedFieldCondition(expr string, v any) (string, []any, bool) {
+	switch val := v.(type) {
+	case string:
+		if !pushdownSafeString(val) {
+			return "", nil, false
+		}
+
+		return equalityCondition(expr, ""), []any{marshalPushdownValue(v)}, true
+
+	case types.ObjectID, bool:
+		return equalityCondition(expr, ""), []any{marshalPushdownValue(v)}, true
+
+	case *types.Document:
+		if inAny, err := val.Get("$in"); err == nil {
+			if arr, ok := inAny.(*types.Array); ok {
+				return inCondition(expr, "", arr)
+			}
+		}
+
+		return "", nil, false
+
+	default:
+		return "", nil, false
+	}
+}
+
+// marshalPushdownValue renders a value the same way it is stored, so a compared
+// -> expression matches byte-for-byte.
+func marshalPushdownValue(v any) any {
+	return string(must.NotFail(sjson.MarshalSingleValue(v)))
+}
+
+// equalityCondition matches {field: scalar}. Mongo equality on a non-_id field
+// also matches an ARRAY containing the value, so keep an index-friendly arm for
+// array values (array JSON starts with '['); _id is never an array.
+func equalityCondition(expr, key string) string {
+	if key == "_id" {
+		return fmt.Sprintf(`%s = ?`, expr)
+	}
+
+	return fmt.Sprintf(`(%[1]s = ? OR (%[1]s >= '[' AND %[1]s < '\'))`, expr)
+}
+
+// regexCondition pushes a plain literal {$regex} as a LIKE substring. LIKE on the
+// stored JSON text matches a substring anywhere (including inside a string array,
+// which the Go filter re-checks), and LIKE's ASCII case-insensitivity is a
+// superset of a case-insensitive regex for an ASCII literal. `x` options
+// (extended: whitespace changes meaning) are not pushed.
+func regexCondition(expr, pattern, options string) (string, []any, bool) {
+	if strings.ContainsRune(options, 'x') || !pushdownSafeLiteralSubstring(pattern) {
+		return "", nil, false
+	}
+
+	return fmt.Sprintf(`%s LIKE ?`, expr), []any{"%" + pattern + "%"}, true
+}
+
+// operatorCondition pushes {field: {$in: [...]}} / {field: {$regex: ...}} from an
+// operator expression. All operators in a field expression are ANDed, so pushing
+// a SUPERSET of any ONE of them is a valid superset of the whole expression —
+// coexisting operators ($ne, $nin, $options, …) do not make this unsafe.
+func operatorCondition(expr, key string, doc *types.Document) (string, []any, bool) {
+	if existsAny, err := doc.Get("$exists"); err == nil {
+		if exists, ok := existsAny.(bool); ok {
+			if exists {
+				return expr + ` IS NOT NULL`, nil, true
+			}
+
+			return expr + ` IS NULL`, nil, true
+		}
+	}
+
+	if elemAny, err := doc.Get("$elemMatch"); err == nil {
+		if elemDoc, ok := elemAny.(*types.Document); ok {
+			if cond, condArgs, ok := elemMatchCondition(expr, elemDoc); ok {
+				return cond, condArgs, true
+			}
+		}
+	}
+
+	if inAny, err := doc.Get("$in"); err == nil {
+		if arr, ok := inAny.(*types.Array); ok {
+			if cond, condArgs, ok := inCondition(expr, key, arr); ok {
+				return cond, condArgs, true
+			}
+		}
+	}
+
+	if reAny, err := doc.Get("$regex"); err == nil {
+		var pattern, options string
+
+		switch p := reAny.(type) {
+		case string:
+			pattern = p
+		case types.Regex:
+			pattern, options = p.Pattern, p.Options
+		}
+
+		if optAny, err := doc.Get("$options"); err == nil {
+			if o, ok := optAny.(string); ok {
+				options = o
+			}
+		}
+
+		if cond, condArgs, ok := regexCondition(expr, pattern, options); ok {
+			return cond, condArgs, true
+		}
+	}
+
+	// numeric/date range operators, extracted with ->> (see rangeConditions).
+	scalarExpr := fmt.Sprintf(`%s->>%s`, metadata.DefaultColumn, quoteJSONLabel(key))
+
+	return rangeConditions(scalarExpr, doc)
+}
+
+// elemMatchCondition pushes the document form of $elemMatch when every inner
+// field can be represented as a safe equality or $in condition. json_each keeps
+// all predicates on the same array element, which is the defining $elemMatch
+// rule. The regular Go filter remains authoritative, so the array-containment
+// arms in equalityCondition may admit extra candidates but can never lose a
+// real match.
+func elemMatchCondition(expr string, doc *types.Document) (string, []any, bool) {
+	if doc.Len() == 0 {
+		return "", nil, false
+	}
+
+	var conditions []string
+	var args []any
+
+	for _, key := range doc.Keys() {
+		if key == "" || strings.HasPrefix(key, "$") || strings.ContainsRune(key, '.') {
+			return "", nil, false
+		}
+
+		value := must.NotFail(doc.Get(key))
+		innerExpr := fmt.Sprintf(`element.value->%s`, quoteJSONLabel(key))
+
+		var condition string
+		var conditionArgs []any
+		var ok bool
+
+		switch typed := value.(type) {
+		case string:
+			if !pushdownSafeString(typed) {
+				return "", nil, false
+			}
+			condition = equalityCondition(innerExpr, "")
+			conditionArgs = []any{marshalPushdownValue(value)}
+			ok = true
+		case types.ObjectID, bool:
+			condition = equalityCondition(innerExpr, "")
+			conditionArgs = []any{marshalPushdownValue(value)}
+			ok = true
+		case *types.Document:
+			if inAny, err := typed.Get("$in"); err == nil {
+				if arr, isArray := inAny.(*types.Array); isArray {
+					condition, conditionArgs, ok = inCondition(innerExpr, "", arr)
+				}
+			}
+		}
+
+		if !ok {
+			return "", nil, false
+		}
+
+		conditions = append(conditions, condition)
+		args = append(args, conditionArgs...)
+	}
+
+	return fmt.Sprintf(
+		`(json_type(%[1]s) = 'array' AND EXISTS (`+
+			`SELECT 1 FROM json_each(%[1]s) AS element `+
+			`WHERE json_type(element.value) = 'object' AND %s))`,
+		expr,
+		strings.Join(conditions, " AND "),
+	), args, true
+}
+
+// rangeConditions pushes numeric/date range operators ($gt/$gte/$lt/$lte) using
+// the ->> (SQL value) accessor, so SQLite compares the extracted number
+// NUMERICALLY. The -> JSON-text accessor used for equality would compare
+// lexically ("10" < "9"), which is wrong for numbers and dates — which is
+// exactly why range was NOT pushed before. sjson stores int32/int64, doubles and
+// dates all as JSON numbers (a date as its Unix-millis), so ->> yields a
+// comparable value; a null/missing/string field yields NULL or a non-numeric
+// that the comparison excludes — matching Mongo's type-bracketed $lt/$gt, and the
+// Go filter stays authoritative regardless. Only NUMBER/DATE bounds are pushed;
+// string ranges (collation/serialization subtleties) stay in Go.
+func rangeConditions(scalarExpr string, doc *types.Document) (string, []any, bool) {
+	ops := [...]struct{ key, sqlOp string }{
+		{"$gt", ">"},
+		{"$gte", ">="},
+		{"$lt", "<"},
+		{"$lte", "<="},
+	}
+
+	var parts []string
+
+	var args []any
+
+	for _, op := range ops {
+		val, err := doc.Get(op.key)
+		if err != nil {
+			continue
+		}
+
+		arg, ok := numericBound(val)
+		if !ok {
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf(`%s %s ?`, scalarExpr, op.sqlOp))
+		args = append(args, arg)
+	}
+
+	switch len(parts) {
+	case 0:
+		return "", nil, false
+	case 1:
+		return parts[0], args, true
+	default:
+		// e.g. a week filter {$gte: A, $lte: B}: both arms ANDed.
+		return "(" + strings.Join(parts, " AND ") + ")", args, true
+	}
+}
+
+// numericBound returns the SQL argument for a range bound that can be compared
+// numerically by ->>, or ok=false for a non-number/date bound (left to Go). A
+// date is compared as its Unix-millis, matching how sjson stores it; a BSON
+// Timestamp is compared as its uint64, also matching how sjson stores it (as a
+// JSON number). Pushing a Timestamp $gt/$gte down matters for a client that tails
+// a capped collection with a `{ts: {$gt: <last>}}` cursor (e.g. a Meteor 3 driver
+// tailing local.oplog.rs): without it, every awaitData poll had to sjson-decode
+// and range-filter the whole collection in Go — a residual CPU load on an idle
+// tail. The Go filter still re-applies the exact filter, so this only ever prunes
+// rows the bound proves cannot match.
+func numericBound(v any) (any, bool) {
+	switch n := v.(type) {
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		return n, true
+	case time.Time:
+		return n.UnixMilli(), true
+	case types.Timestamp:
+		// sjson stores a Timestamp as its uint64. Decline to push a value that
+		// would not fit a signed 64-bit integer (only reachable in the far future),
+		// so the SQL argument stays an exact integer comparison; the Go filter
+		// remains authoritative, so declining is safe (never a subset).
+		if uint64(n) > math.MaxInt64 {
+			return nil, false
+		}
+
+		return int64(n), true
+	default:
+		return nil, false
+	}
+}
+
+// inCondition pushes {field: {$in: [...]}} as a SUPERSET: it pushes the
+// pushdown-safe string / ObjectID elements as an index-usable IN, and — because a
+// `null` element of $in also matches a field that is null OR missing, both of which
+// render as SQL NULL under ->  — adds an `expr IS NULL` arm for a null element. Both
+// arms reference the exact indexed expression, so SQLite serves the whole thing as
+// an OR-union of index seeks. This is why {boardId: {$in: [id, null]}} — the shape a
+// board's card queries use when no subtasks-default board is set — still uses the
+// index instead of full-scanning the collection (the previous version bailed out
+// entirely on the null, dropping the WHERE and pinning CPU on a poll-and-diff client,
+// e.g. a Meteor 3 driver: boards then loaded lists but never cards).
+//
+// It still bails (leaving the whole condition to the in-Go filter) when an element is
+// something with no safe superset arm — a number, bool, unsafe string, or nested
+// doc/array — since pushing only the other elements would make IN a SUBSET.
+func inCondition(expr, key string, arr *types.Array) (string, []any, bool) {
+	if arr.Len() == 0 {
+		// MongoDB's $in with no alternatives can never match, including when the
+		// field is an array. Push that exact result down instead of decoding the
+		// whole collection merely to return no documents.
+		return "0", nil, true
+	}
+
+	placeholders := make([]string, 0, arr.Len())
+	condArgs := make([]any, 0, arr.Len())
+	hasNull := false
+
+	for i := 0; i < arr.Len(); i++ {
+		e := must.NotFail(arr.Get(i))
+
+		switch ev := e.(type) {
+		case string:
+			if !pushdownSafeString(ev) {
+				return "", nil, false
+			}
+			placeholders = append(placeholders, "?")
+			condArgs = append(condArgs, marshalPushdownValue(e))
+		case types.ObjectID, bool:
+			placeholders = append(placeholders, "?")
+			condArgs = append(condArgs, marshalPushdownValue(e))
+		case types.NullType:
+			hasNull = true
+		default:
+			return "", nil, false
+		}
+	}
+
+	arms := make([]string, 0, 3)
+	if len(placeholders) > 0 {
+		arms = append(arms, fmt.Sprintf(`%s IN (%s)`, expr, strings.Join(placeholders, ", ")))
+	}
+	if hasNull {
+		arms = append(arms, fmt.Sprintf(`%s IS NULL`, expr))
+	}
+	if len(arms) == 0 {
+		return "", nil, false
+	}
+
+	// _id is never an array, so it needs no array-containment arm.
+	if key != "_id" {
+		arms = append(arms, fmt.Sprintf(`(%[1]s >= '[' AND %[1]s < '\')`, expr))
+	}
+
+	if len(arms) == 1 {
+		return arms[0], condArgs, true
+	}
+
+	return "(" + strings.Join(arms, " OR ") + ")", condArgs, true
+}
+
+// quoteJSONLabel quotes a field name for the -> operator the same way
+// Registry.indexesCreate does (%q), so the WHERE expression text matches the
+// expression-index text and SQLite's index matcher can pair them up.
+func quoteJSONLabel(field string) string {
+	return fmt.Sprintf("%q", field)
+}
+
+// prepareOrderByClause returns ORDER BY clause for given sort document.
+//
+// The provided sort document should be already validated.
+// Provided document should only contain a single value.
+func prepareOrderByClause(sort *types.Document) string {
+	if sort.Len() != 1 {
+		return ""
+	}
+
+	v := must.NotFail(sort.Get("$natural"))
+	var order string
+
+	switch v.(int64) {
+	case 1:
+		// Ascending order
+	case -1:
+		order = " DESC"
+	default:
+		panic("not reachable")
+	}
+
+	return fmt.Sprintf(" ORDER BY %s%s", metadata.RecordIDColumn, order)
+}

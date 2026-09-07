@@ -1,0 +1,81 @@
+// Copyright 2021 FerretDB Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package metadata provides access to databases and collections information.
+package metadata
+
+import (
+	"strings"
+
+	"github.com/FerretDB/FerretDB/internal/backends"
+)
+
+// Collection will probably have a method for getting column name / SQLite path expression for the given document field
+// once we implement field extraction.
+// IDColumn probably should go away.
+// TODO https://github.com/FerretDB/FerretDB/issues/226
+
+const (
+	// CurrentIndexFormat appends the SJSON schema expression to eligible
+	// single-field indexes, making BSON-aware distinct scans covering.
+	CurrentIndexFormat = 2
+
+	// DefaultColumn is a column name for all fields.
+	DefaultColumn = backends.ReservedPrefix + "sjson"
+
+	// IDColumn is a SQLite path expression for _id field.
+	// Keep this expression byte-for-byte identical to expression indexes made by
+	// Registry.indexesCreate and query.jsonPathExpr. SQLite matches expression
+	// indexes syntactically; the equivalent '$._id' JSON path caused every update
+	// and delete by _id to scan the complete collection.
+	IDColumn = DefaultColumn + `->"_id"`
+
+	// RecordIDColumn is a name for RecordID column to store capped collection record id.
+	RecordIDColumn = backends.ReservedPrefix + "record_id"
+)
+
+// SchemaPathExpr returns the SJSON schema expression for a top-level field.
+// Keep it byte-for-byte identical in index definitions and distinct SELECTs so
+// SQLite recognizes that the result is covered by the expression index.
+func SchemaPathExpr(field string) string {
+	return DefaultColumn + `->'$."$s"'->'p'->'` + strings.ReplaceAll(field, `'`, `''`) + `'`
+}
+
+// Collection represents collection metadata.
+//
+// Collection value should be immutable to avoid data races.
+// Use [deepCopy] to replace the whole value instead of modifying fields of existing value.
+type Collection struct {
+	Name      string
+	TableName string
+	Settings  Settings
+}
+
+// Capped returns true if collection is capped.
+func (c Collection) Capped() bool {
+	return c.Settings.CappedSize > 0
+}
+
+// deepCopy returns a deep copy.
+func (c *Collection) deepCopy() *Collection {
+	if c == nil {
+		return nil
+	}
+
+	return &Collection{
+		Name:      c.Name,
+		TableName: c.TableName,
+		Settings:  c.Settings.deepCopy(),
+	}
+}

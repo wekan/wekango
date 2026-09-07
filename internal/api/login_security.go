@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
+
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -41,4 +43,15 @@ func compareMeteorPassword(stored []byte, password string) bool {
 	// See docs/Go-Login-Security.md for the reviewed CodeQL false positive.
 	digest := sha256.Sum256([]byte(password))
 	return bcrypt.CompareHashAndPassword(stored, []byte(hex.EncodeToString(digest[:]))) == nil
+}
+
+// loginDisabled follows the JavaScript validation hook, including the empty
+// string found in raw imported records (Collection2 normally unsets it).
+// Arrays/objects and nonempty strings stay disabled; interpreting "false" as a
+// boolean is unsafe.
+func loginDisabled(value any) bool {
+	if _, undefined := value.(bson.Undefined); undefined {
+		return false
+	}
+	return boardReadTruthy(value)
 }

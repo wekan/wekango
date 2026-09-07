@@ -107,7 +107,7 @@ jobs:
             go test -race ./internal/eventlog -count=1
           WEKAN_SOURCE_ROOT="$PWD/.tools/wekan-reference" \
             WEKAN_MONGODB_MODULE="$PWD/tests/node_modules/mongodb" \
-            go test -race ./internal/api -run "TestUserBoardsSourcePolicy|TestUserReads" -count=1
+            go test -race ./internal/api -run "TestUserBoardsSourcePolicy|TestUserReads|TestSourceLoginDisabledStates" -count=1
       - name: Verify existing SQLite board in Chromium and Firefox
         run: |
           set -euo pipefail

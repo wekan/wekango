@@ -27,6 +27,7 @@ build_target() {
   file="wekan-$name$ext"
   # A failed build must not leave an older executable eligible for publication.
   rm -f -- "$out/$file" "$out/$file.sha256sum"
+  python3 scripts/sync-ferretdb.py --verify
   GOOS="$target_os" GOARCH="$target_arch" GOARM="$target_arm" "$GO" build \
     -mod=readonly -trimpath -buildvcs=false \
     -ldflags="-s -w -X github.com/wekan/wekango/internal/version.Version=$version" \
@@ -57,7 +58,10 @@ case "${1:-build}" in
     done < "$platforms"
     ;;
   test)
+    python3 scripts/sync-ferretdb.py --verify
+    python3 scripts/test-sync-ferretdb.py
     "$GO" test -mod=readonly ./...
+    WEKANGO_GO="$GO" bash scripts/test-ferretdb.sh
     (cd internal/compat/termbox && "$GO" test -mod=readonly ./...)
     bash scripts/release/test-build.sh
     ;;

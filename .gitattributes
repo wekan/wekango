@@ -1,0 +1,5 @@
+# Preserve the exact Git-object bytes verified by PROVENANCE.json on every OS.
+internal/compat/ferretdb/** -text
+
+# Preserve upstream SQL template indentation in the verified source copy.
+internal/compat/ferretdb/internal/backends/mysql/metadata/registry.go whitespace=-space-before-tab

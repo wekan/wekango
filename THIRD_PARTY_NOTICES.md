@@ -1,7 +1,7 @@
 # Third-party notices
 
 Generated from the audited target package closures. WeKan-owned source is MIT;
-adapted MongoDB tool entry points retain Apache-2.0;
+adapted MongoDB tool entry points and the copied FerretDB runtime retain Apache-2.0;
 each third-party component retains its own license below. See `licenses.csv`
 for the package inventory, `modules.json` for resolved versions, and
 `sources/manifest.json` for the exact MPL-2.0 corresponding-source archives.

@@ -26,10 +26,10 @@ Unknown licenses fail review rather than being assumed compatible.
 | --- | --- | --- | --- |
 | Go toolchain / standard library | 1.27.0 | [BSD-3-Clause](https://go.dev/LICENSE) | HTTP, templates, embed, JSON, archives, cryptographic randomness, logging, tests. Use the latest security patch before releasing. |
 | Caddy | `github.com/caddyserver/caddy/v2 v2.11.5-0.20260906132044-9dd286c5e49e` | [Apache-2.0](https://github.com/caddyserver/caddy/blob/9dd286c5e49e/LICENSE), [releases](https://github.com/caddyserver/caddy/releases) | Pinned maintained upstream snapshot (2026-09-06), newer than stable v2.11.4, required for fixed CEL compatibility. Embedded HTTP/TLS lifecycle. Import only required modules; third-party Caddy plugins need their own review. |
-| Maintained WeKan FerretDB v1 fork | `github.com/FerretDB/FerretDB v1.71.0`, replaced by `github.com/wekan/FerretDB v1.71.0` | [Apache-2.0](https://github.com/wekan/FerretDB/blob/v1.71.0/LICENSE), [releases](https://github.com/wekan/FerretDB/releases) | Public embeddable API, SQLite backend, existing document representation. Do not substitute upstream FerretDB v2 or direct application-owned SQL tables. |
+| Maintained WeKan FerretDB v1 fork | `github.com/FerretDB/FerretDB`, replaced by the exact-commit runtime copy in `internal/compat/ferretdb` | [Apache-2.0](internal/compat/ferretdb/LICENSE), [releases](https://github.com/wekan/FerretDB/releases) | Public embeddable API, SQLite backend, existing document representation. Do not substitute upstream FerretDB v2 or direct application-owned SQL tables. |
 | MongoDB Go Driver | `go.mongodb.org/mongo-driver/v2 v2.9.0` | [Apache-2.0](https://github.com/mongodb/mongo-go-driver/blob/v2.9.0/LICENSE), [releases](https://github.com/mongodb/mongo-go-driver/releases) | Application BSON and MongoDB wire client. Replaces the old prototype's driver v1 and unmaintained `gopkg.in/mgo.v2`. The FerretDB fork still has its own driver v1 dependency; that is a separate migration. |
 | Go crypto extensions | `golang.org/x/crypto v0.56.0` | [BSD-3-Clause](https://github.com/golang/crypto/blob/v0.56.0/LICENSE) | Compatible password-hash verification. Preserve Meteor's password preprocessing and token formats rather than inventing incompatible hashes. |
-| SQLite Go implementation | FerretDB's resolved `modernc.org/sqlite`; fork v1.71.0 selects v1.57.0 | [BSD-3-Clause wrapper](https://gitlab.com/cznic/sqlite/-/blob/master/LICENSE), [SQLite public domain](https://sqlite.org/copyright.html) | Pure Go permits CGO-free builds. v1.58.0 is the newest available stable candidate; update only with FerretDB schema and platform conformance tests. Translated sources and transitive modernc libraries need retained notices. |
+| SQLite Go implementation | FerretDB's resolved `modernc.org/sqlite`; the copied fork selects v1.57.0 | [BSD-3-Clause wrapper](https://gitlab.com/cznic/sqlite/-/blob/master/LICENSE), [SQLite public domain](https://sqlite.org/copyright.html) | Pure Go permits CGO-free builds. v1.58.0 is the newest available stable candidate; update only with FerretDB schema and platform conformance tests. Translated sources and transitive modernc libraries need retained notices. |
 
 The core pins above were verified against the Go module proxy's release/commit
 metadata and upstream license files. Caddy is an explicit prerelease snapshot,
@@ -44,7 +44,7 @@ versions needed by the tested Caddy snapshot instead of blindly upgrading APIs.
 
 ## Transitive MPL-2.0 source obligations
 
-FerretDB v1.71.0 registers its MySQL backend even when the selected runtime
+The copied FerretDB v1 runtime registers its MySQL backend even when the selected runtime
 backend is SQLite. Therefore `github.com/go-sql-driver/mysql` is linked, under
 [MPL-2.0](https://github.com/go-sql-driver/mysql/blob/master/LICENSE). This
 license is not GPL; preserve its notices and publish/provide the corresponding
@@ -215,3 +215,7 @@ pinned to v7.6.0 (Apache-2.0), matching the reference WeKan driver. It executes
 the original JavaScript migrations for differential fixtures; it is not bundled
 or launched by the Go product. Its transitive packages use Apache-2.0, MIT, BSD
 or ISC licenses. The CI reference source is pinned to WeKan `2037d4acb32b12a9de35fbcbba506801371d751c`.
+
+The runtime copy provenance and refresh procedure are documented in
+[Go-FerretDB-Source.md](docs/Go-FerretDB-Source.md). It includes the fork correction
+for concurrent whole-document update loss while preserving its module graph.

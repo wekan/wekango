@@ -3,7 +3,7 @@ module github.com/wekan/wekango
 go 1.27.0
 
 require (
-	github.com/FerretDB/FerretDB v1.71.0
+	github.com/FerretDB/FerretDB v1.73.0
 	github.com/caddyserver/caddy/v2 v2.11.5-0.20260906132044-9dd286c5e49e
 	github.com/mongodb/mongo-tools v0.0.0-20260903204226-5df87866650a
 	go.mongodb.org/mongo-driver/v2 v2.9.0
@@ -195,7 +195,7 @@ require (
 	modernc.org/sqlite v1.57.0 // indirect
 )
 
-replace github.com/FerretDB/FerretDB => github.com/wekan/FerretDB v1.71.0
+replace github.com/FerretDB/FerretDB => ./internal/compat/ferretdb
 
 replace gopkg.in/yaml.v2 => ./internal/compat/yamlv2
 

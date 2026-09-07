@@ -52,7 +52,7 @@ with `python3 scripts/sync-compatibility.py /path/to/wekan` and review its diff.
 | --- | --- | --- |
 | Native executable | Go 1.27.0 | One Go process; browser HTML embedded; `--version`, `--check-config`, `--compatibility` |
 | HTTP/TLS | Caddy `v2.11.5-0.20260906132044-9dd286c5e49e`, selected modules only | Caddy and application HTTP server in one process; private loopback upstream; admin API/config persistence disabled; automatic TLS opt-in |
-| Database | wekan/FerretDB v1.71.0 exported `ferretdb` package | Same SQLite implementation; reopen fixtures created directly by FerretDB; no external database executable needed |
+| Database | wekan/FerretDB v1 runtime source copy; exported `ferretdb` package | Same SQLite implementation; reopen fixtures created directly by FerretDB; no external database executable needed |
 | MongoDB protocol client | Official MongoDB Go Driver v2.9.0 | External MONGO_URL or private embedded endpoint; BSON document shapes retained |
 | Password hashing | golang.org/x/crypto v0.56.0 | Existing Meteor SHA256-then-bcrypt local password verification; other mechanisms remain gated |
 | Environment and files | Go standard library | Bundle `PORT=8080`; `ROOT_URL`; external `MONGO_URL`; `WRITABLE_PATH`; `FERRETDB_SQLITE_DIR` / `FERRETDB_SQLITE_URL`; attachment/avatar paths |
@@ -142,6 +142,11 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   username lookup, credential redaction and first-membership summaries, including
   inactive/archived memberships as in the source. Imported primitive IDs,
   malformed members and public error responses have regression coverage.
+- [x] Accept re-enabled local accounts while retaining historical security-block
+  metadata. Preserve JavaScript disabled-flag truthiness, recreate missing token
+  arrays atomically and guard issuance against concurrent disabling. Malformed
+  string token fields remain rejected; unsupported authentication remains gated.
+  See docs/Go-Login-Security.md for source cleaner and REST/DDP differences.
 - [x] Review saved login CodeQL findings: typed literal BSON lookup and mandatory
   Meteor prehash-plus-bcrypt verification have adversarial tests. The follow-up
   alert #3 is a reviewed false positive; source comments do not dismiss GitHub
@@ -149,6 +154,11 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
 - [ ] Resolve the inherited source writer's batch-count discrepancy: it currently
   increments once per flush, ignoring the producer's accumulated `count`. This
   port preserves that observed behavior; stored counts are not exact call totals.
+- [x] Include the maintained FerretDB runtime source with exact-commit provenance
+  and Apache-2.0 notices, so local database corrections build without publishing.
+  Mutation read/modify/write isolation prevents concurrent token loss.
+- [ ] Include mutation-gate queue time in command `maxTimeMS`; connection
+  cancellation already interrupts waiting, but the handler timer starts later.
 - [ ] Fix pinned FerretDB monitoring gaps: fractional serverStatus `uptime`
   cannot decode in upstream `mongostat`; the `top` command is not implemented.
 - [ ] Complete external MongoDB/authentication and every tools-option matrix.
@@ -190,6 +200,15 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   snapshots verify records are unchanged. Tests include ID/username precedence,
   legacy primitive IDs, token rejection, redaction, optional slashes and HEAD.
   Chromium and Firefox verify self profiles and admin list/detail responses.
+- Login-state checks compare 27 actual-source hook fixtures and exercise ten
+  stored disabled-flag states, normal re-enabling, retained block metadata,
+  malformed token fields and unsupported authentication. Four deterministic
+  disable races reject token issuance; twenty repeated concurrent-login runs
+  preserve both new sessions. The copied FerretDB handler tests reproduce
+  snapshot races across update/findAndModify and verify mutation isolation,
+  cancellation and independent reads. Full Go/build tests and native SQLite
+  report/export checks pass. Chromium/Firefox cover missing-token recreation
+  and a raw empty-string disabled flag through the actual executable.
 - The built native executable is statically linked; version stamping and its
   per-binary SHA256 file verify.
 - `tests/browser.cjs` passes in Chromium and Firefox against the real executable:
@@ -199,11 +218,15 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   `tests/startup.cjs` restarts the built executable against the same disposable
   SQLite files and verifies persisted gating, skip/force flags and clean shutdown.
   These are preview-page checks, not the full Meteor UI suite.
-- Dependency audit covers all 25 candidate targets: 256-row license union and
+- The previous dependency audit covered all 25 candidate targets: a 256-row license union and
   zero imported-package vulnerability findings. Native reachable-symbol scan
   passes. The unimported, unsupported `x/crypto/openpgp` module advisory is
   documented and imports are explicitly prohibited. Caddy uses a maintained
   upstream snapshot because stable v2.11.4 cannot build with fixed CEL versions.
+- After importing the 470-file runtime source at fork commit `5472f18f`, native
+  license/package and reachable-symbol vulnerability audits pass. Apache-2.0
+  LICENSE/NOTICE remain packaged. Other platform audits and cross-build results
+  above precede this source-copy change and need refreshing before release.
 - Release orchestration tests, dependency notice packaging tests and actionlint
   pass. All 25 candidate targets cross-compile and their checksums verify. Only Linux
   ARM64 has been run locally; other platform runtime checks remain CI work.
