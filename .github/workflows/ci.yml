@@ -1,0 +1,113 @@
+name: Test native binaries
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: amd64
+          - runner: ubuntu-24.04-arm
+            platform: arm64
+          - runner: macos-15
+            platform: mac-arm64
+          - runner: macos-15-intel
+            platform: mac-amd64
+          - runner: windows-2025
+            platform: win64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Test and build native executable
+        env:
+          TARGET: ${{ matrix.platform }}
+        run: |
+          export TMPDIR="$PWD/.tools/tmp"
+          mkdir -p "$TMPDIR"
+          go mod verify
+          ./build.sh test
+          ./build.sh build "$TARGET"
+          binary="dist/wekan-$TARGET"
+          [[ "$TARGET" != win* ]] || binary="$binary.exe"
+          "$binary" --version
+  dependencies:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Audit dependency licenses and reachable vulnerabilities
+        run: |
+          export TMPDIR="$PWD/.tools/tmp"
+          mkdir -p "$TMPDIR"
+          ./scripts/dependency-audit/check.sh
+  browser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+      - name: Install test browsers
+        run: |
+          export TMPDIR="$PWD/.tools/tmp"
+          mkdir -p "$TMPDIR"
+          npm ci --prefix tests
+          npx --prefix tests playwright install --with-deps chromium firefox
+      - name: Verify existing SQLite board in Chromium and Firefox
+        run: |
+          set -euo pipefail
+          export TMPDIR="$PWD/.tools/tmp"
+          mkdir -p "$TMPDIR/browser"
+          ./build.sh build amd64
+          go run ./tests/browserfixture "$TMPDIR/browser/data/files/db"
+          PORT=3900 ROOT_URL=http://127.0.0.1:3900 BIND_IP=127.0.0.1 \
+            WRITABLE_PATH="$TMPDIR/browser/data" \
+            ./dist/wekan-amd64 > "$TMPDIR/browser/server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:3900/health; then ready=true; break; fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then cat "$TMPDIR/browser/server.log"; exit 1; fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then cat "$TMPDIR/browser/server.log"; exit 1; fi
+          WEKANGO_SCREENSHOTS="$TMPDIR/browser/screenshots" node tests/browser.cjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: browser-evidence
+          path: |
+            .tools/tmp/browser/screenshots/*
+            .tools/tmp/browser/server.log
+          if-no-files-found: warn
+          retention-days: 14

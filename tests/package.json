@@ -1,0 +1,7 @@
+{
+  "name": "wekango-browser-tests",
+  "private": true,
+  "license": "MIT",
+  "scripts": { "test": "node browser.cjs" },
+  "devDependencies": { "@playwright/test": "1.63.0" }
+}

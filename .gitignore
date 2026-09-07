@@ -2,3 +2,8 @@ wekango
 .build
 *.zip
 android-ndk*
+
+dist/
+.tools/
+data/
+node_modules/

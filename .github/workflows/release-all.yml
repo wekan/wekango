@@ -1,0 +1,92 @@
+name: Prepare multi-platform release
+# A maintainer creates/pushes a tag and dispatches this workflow explicitly.
+# The workflow prepares a draft; a human reviews and publishes it.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing release tag, for example v0.1.0'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'wekan/wekango'
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Validate tag input
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || exit 2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.version }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Test and audit release source
+        run: |
+          export TMPDIR="$PWD/.tools/tmp"
+          mkdir -p "$TMPDIR"
+          go mod verify
+          ./build.sh test
+          AUDIT_ALL_PLATFORMS=1 ./scripts/dependency-audit/check.sh
+      - name: Build all candidate platforms
+        env:
+          WEKANGO_VERSION: ${{ inputs.version }}
+        run: |
+          ./build.sh dist-seq
+          ./dist/wekan-amd64 --version
+          (cd dist && sha256sum -c ./*.sha256sum)
+          # Per-binary checksums travel beside the uncompressed executables.
+          cp LICENSE dist/LICENSE
+          cp .tools/dependency-audit/THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
+          # Include full licenses, provenance and required MPL-covered sources.
+          tar -czf dist/wekan-dependency-notices.tar.gz -C .tools dependency-audit
+          cp ROADMAP.md dist/ROADMAP.md
+          {
+            echo "WeKan Go prototype $RELEASE_VERSION"
+            echo
+            echo 'This is an incomplete port; read ROADMAP.md before using it.'
+            echo 'Cross-compiled targets are not all runtime-certified.'
+            echo
+            echo 'Platforms:'
+            ./build.sh platforms
+            echo
+            echo 'Each wekan-<platform>[.exe] has a matching .sha256sum file.'
+            echo 'Verify with: sha256sum -c wekan-amd64.sha256sum'
+          } > dist/README.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-binaries
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+  draft:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: wekan/wekango
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-binaries
+          path: dist
+      - name: Create draft from an existing tag
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c ./*.sha256sum)
+          # No tag creation and no replacement of existing release assets.
+          gh release create "$RELEASE_VERSION" dist/* --verify-tag --draft --prerelease \
+            --title "$RELEASE_VERSION" --notes-file dist/README.md

@@ -1,0 +1,27 @@
+# Asset suffix GOOS GOARCH GOARM (- means unset)
+# Candidate FerretDB SQLite matrix; successful compilation is not runtime certification.
+amd64 linux amd64 -
+arm64 linux arm64 -
+armhf linux arm 7
+armv6 linux arm 6
+armel linux arm 5
+i386 linux 386 -
+ppc64le linux ppc64le -
+s390x linux s390x -
+riscv64 linux riscv64 -
+loong64 linux loong64 -
+win64 windows amd64 -
+win-arm64 windows arm64 -
+win32 windows 386 -
+mac-amd64 darwin amd64 -
+mac-arm64 darwin arm64 -
+freebsd-amd64 freebsd amd64 -
+freebsd-i386 freebsd 386 -
+freebsd-armel freebsd arm 5
+freebsd-armv6 freebsd arm 6
+freebsd-armv7 freebsd arm 7
+freebsd-arm64 freebsd arm64 -
+netbsd-amd64 netbsd amd64 -
+openbsd-amd64 openbsd amd64 -
+openbsd-arm64 openbsd arm64 -
+android-arm64 android arm64 -

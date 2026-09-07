@@ -1,0 +1,766 @@
+{
+  "source": "https://github.com/wekan/wekan",
+  "commit": "1fd544e487c007fd409a33d4c446016ee6516254",
+  "scope": "literal JavaScript references; dynamic routes, environment aliases and collection constructors require additional audit",
+  "environment": [
+    "ACCOUNTS_COMMON_LOGIN_EXPIRATION_IN_DAYS",
+    "ACCOUNTS_LOCKOUT_KNOWN_USERS_FAILURES_BEFORE",
+    "ACCOUNTS_LOCKOUT_KNOWN_USERS_FAILURE_WINDOW",
+    "ACCOUNTS_LOCKOUT_KNOWN_USERS_PERIOD",
+    "ACCOUNTS_LOCKOUT_UNKNOWN_USERS_FAILURES_BEFORE",
+    "ACCOUNTS_LOCKOUT_UNKNOWN_USERS_FAILURES_BERORE",
+    "ACCOUNTS_LOCKOUT_UNKNOWN_USERS_FAILURE_WINDOW",
+    "ACCOUNTS_LOCKOUT_UNKNOWN_USERS_LOCKOUT_PERIOD",
+    "ATTACHMENTS_UPLOAD_EXTERNAL_PROGRAM",
+    "ATTACHMENTS_UPLOAD_MAX_SIZE",
+    "ATTACHMENTS_UPLOAD_MIME_TYPES",
+    "ATTACHMENT_API_MAX_DOWNLOAD_BYTES",
+    "ATTACHMENT_API_MAX_UPLOAD_BYTES",
+    "AVATARS_UPLOAD_EXTERNAL_PROGRAM",
+    "AVATARS_UPLOAD_MAX_SIZE",
+    "AVATARS_UPLOAD_MIME_TYPES",
+    "BIGEVENTS_PATTERN",
+    "BROWSER_POLICY_ENABLED",
+    "CARDS_LOADING",
+    "CARDS_LOADING_LAZY_THRESHOLD",
+    "CARD_OPENED_WEBHOOK_ENABLED",
+    "CASE_VALIDATE_URL",
+    "CAS_BASE_URL",
+    "CAS_ENABLED",
+    "CAS_LOGIN_URL",
+    "CORS",
+    "CORS_ALLOW_HEADERS",
+    "CORS_EXPOSE_HEADERS",
+    "DASHBOARD_URL",
+    "DDP_TRANSPORT",
+    "DEBUG",
+    "DEBUGSPEED",
+    "DEBUGSPEED_LOG_FILE",
+    "DEBUGSPEED_SAMPLE_MS",
+    "DEBUGSPEED_SLOW_MS",
+    "DEFAULT_AUTHENTICATION_METHOD",
+    "DEFAULT_METEOR_REACTIVITY_ORDER",
+    "EMAIL_NOTIFICATION_TIMEOUT",
+    "FERRETDB_DIR",
+    "FERRETDB_SQLITE_DIR",
+    "GRIDFS_ENABLED",
+    "HEADER_LOGIN_EMAIL",
+    "HEADER_LOGIN_FIRSTNAME",
+    "HEADER_LOGIN_ID",
+    "HEADER_LOGIN_LASTNAME",
+    "HEADER_LOGIN_TRUSTED_IP",
+    "HEADER_LOGIN_TRUSTED_IPS",
+    "HEADER_LOGIN_TRUSTED_PROXIES",
+    "HTTP_FORWARDED_COUNT",
+    "IMAGE_COMPRESS_RATIO",
+    "LDAP_ENABLE",
+    "MAIL_FROM",
+    "MAIL_URL",
+    "MATOMO_ADDRESS",
+    "MATOMO_DO_NOT_TRACK",
+    "MATOMO_WITH_USERNAME",
+    "MAX_IMAGE_PIXEL",
+    "METEOR_REACTIVITY_ORDER",
+    "METRICS_ACCEPTED_IP_ADDRESS",
+    "METRICS_ACCESS_TOKEN",
+    "METRICS_TRUST_PROXY",
+    "MONGO_URL",
+    "NODE_ENV",
+    "NOTIFICATION_TRAY_AFTER_READ_DAYS_BEFORE_REMOVE",
+    "NOTIFY_DUE_AT_HOUR_OF_DAY",
+    "NOTIFY_DUE_DAYS_BEFORE_AND_AFTER",
+    "NOTIFY_ON_ASSIGN",
+    "OAUTH2_ADMIN_GROUPS",
+    "OAUTH2_AUTH_ENDPOINT",
+    "OAUTH2_AUTO_REGISTRATION",
+    "OAUTH2_CLIENT_ID",
+    "OAUTH2_ENABLED",
+    "OAUTH2_ID_TOKEN_WHITELIST_FIELDS",
+    "OAUTH2_LOGIN_STYLE",
+    "OAUTH2_LOGOUT_ENDPOINT",
+    "OAUTH2_MERGE_EXISTING_USERS",
+    "OAUTH2_REQUEST_PERMISSIONS",
+    "OAUTH2_SECRET",
+    "OAUTH2_SERVER_URL",
+    "OAUTH2_TOKEN_ENDPOINT",
+    "OAUTH2_USERINFO_ENDPOINT",
+    "OIDC_REDIRECTION_ENABLED",
+    "OLDPWD",
+    "ORACLE_OIM_ENABLED",
+    "PASSWORD_LOGIN_ENABLED",
+    "PERMISSIONS_POLICY",
+    "PWD",
+    "REST_LOGIN_FAILURE_WINDOW_SECONDS",
+    "REST_LOGIN_LOCKOUT_SECONDS",
+    "REST_LOGIN_MAX_FAILURES",
+    "RESULTS_PER_PAGE",
+    "RICHER_CARD_COMMENT_EDITOR",
+    "ROOT_URL",
+    "S3_ACCESS_KEY",
+    "S3_BUCKET",
+    "S3_ENABLED",
+    "S3_ENDPOINT",
+    "S3_PORT",
+    "S3_REGION",
+    "S3_SECRET_KEY",
+    "S3_SSL_ENABLED",
+    "SAML_ATTRIBUTES",
+    "SAML_CERT",
+    "SAML_ENABLED",
+    "SAML_ENTRYPOINT",
+    "SAML_IDENTIFIER_FORMAT",
+    "SAML_IDPSLO_REDIRECTURL",
+    "SAML_ISSUER",
+    "SAML_LOCAL_PROFILE_MATCH_ATTRIBUTE",
+    "SAML_PRIVATE_KEYFILE",
+    "SAML_PROVIDER",
+    "SAML_PUBLIC_CERTFILE",
+    "SANDSTORM",
+    "SANDSTORM_MIGRATION_MARKER",
+    "SANDSTORM_RAW_MONGO_PATH",
+    "SANDSTORM_SMTP_SEND",
+    "SNAP_COMMON",
+    "TRUSTED_URL",
+    "UPLOAD_DANGEROUS_MIME_SCAN_LIMIT",
+    "WAIT_SPINNER",
+    "WEBHOOKS_ATTRIBUTES",
+    "WEKAN_API_USAGE_FLUSH_MS",
+    "WEKAN_CPU_MONITOR",
+    "WEKAN_DB_WAIT_TIMEOUT",
+    "WEKAN_FERRETDB_URL",
+    "WEKAN_FORCE_SCHEMA_UPGRADE",
+    "WEKAN_HISTORY_INTEGRITY_SCAN",
+    "WEKAN_IMPORT_TIMEOUT_MS",
+    "WEKAN_IMPORT_ZIP_MAX_BYTES",
+    "WEKAN_INTEGRITY_PRIVATE_KEY",
+    "WEKAN_INTEGRITY_SCAN",
+    "WEKAN_METRICS_ACCEPTED_IP_ADDRESS",
+    "WEKAN_MIN_FREE_DISK_MB",
+    "WEKAN_MONGODB_URL",
+    "WEKAN_SKIP_SCHEMA_UPGRADE",
+    "WEKAN_SKIP_STARTUP_REPAIR",
+    "WEKAN_SLOW_REQUEST_MS",
+    "WITH_API",
+    "WRITABLE_PATH",
+    "X"
+  ],
+  "restRoutes": [
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/cards/:cardId/checklists/:checklistId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/cards/:cardId/checklists/:checklistId/items/:itemId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/cards/:cardId/comments/:commentId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/cards/:cardId/dependencies/:targetId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/cards/bulk"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/custom-fields/:customFieldId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/custom-fields/:customFieldId/dropdown-items/:dropdownItemId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/domains/:domain"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/integrations/:intId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/integrations/:intId/activities"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/lists/:listId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/assignees/:assigneeId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/members/:memberId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/rules/:ruleId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/boards/:boardId/swimlanes/:swimlaneId"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/users/:userId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/attachment-settings"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/domains"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/orgs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/teams"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/attachments"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/attachments/:attachmentId/export"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cardSettings"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cards/:cardId/checklists"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cards/:cardId/checklists/:checklistId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cards/:cardId/checklists/:checklistId/items/:itemId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cards/:cardId/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cards/:cardId/comments/:commentId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cards/:cardId/dependencies"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cardsByCustomField/:customFieldId/:customFieldValue"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/cards_count"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/custom-fields"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/custom-fields/:customFieldId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/dependencies"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/domains"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/export"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/export/csv"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/export/kanboard"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/exportExcel"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/exportPDF"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/exportZip"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/integrations"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/integrations/:intId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/lists"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/lists/:listId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/lists/:listId/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/exportExcel"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/exportPDF"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/lists/:listId/cards_count"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/rules"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/rules/:ruleId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/swimlanes"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/swimlanes/:swimlaneId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards/:boardId/swimlanes/:swimlaneId/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/boards_count"
+    },
+    {
+      "method": "GET",
+      "path": "/api/cards/:cardId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/settings"
+    },
+    {
+      "method": "GET",
+      "path": "/api/user"
+    },
+    {
+      "method": "GET",
+      "path": "/api/user/cards"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users/:userId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users/:userId/boards"
+    },
+    {
+      "method": "GET",
+      "path": "/branding/images/:fileId.gif"
+    },
+    {
+      "method": "GET",
+      "path": "/document-preview/:fileId/:page.gif"
+    },
+    {
+      "method": "GET",
+      "path": "/document-preview/:fileId/:page.html"
+    },
+    {
+      "method": "GET",
+      "path": "/document-preview/:fileId/manifest.json"
+    },
+    {
+      "method": "GET",
+      "path": "/schema-upgrade-status"
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/users/login"
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/users/logout"
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/users/register"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/cards/:cardId/checklists"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/cards/:cardId/checklists/:checklistId/items"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/cards/:cardId/comments"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/cards/:cardId/dependencies"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/cards/labels"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/copy"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/custom-fields"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/custom-fields/:customFieldId/dropdown-items"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/domains"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/integrations"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/integrations/:intId/activities"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/cards"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/archive"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/assignees/:assigneeId"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/copy"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/customFields/:customFieldId"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/members/:memberId"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId/unarchive"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/cards/bulk"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/copy"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/lists/:listId/move"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/members/:memberId"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/members/:userId/add"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/members/:userId/remove"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/rules"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/swimlanes"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/swimlanes/:swimlaneId/copy"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/swimlanes/:swimlaneId/lists/:listId/ics"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/:boardId/swimlanes/:swimlaneId/move"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/import"
+    },
+    {
+      "method": "POST",
+      "path": "/api/boards/import/:source"
+    },
+    {
+      "method": "POST",
+      "path": "/api/createtoken/:userId"
+    },
+    {
+      "method": "POST",
+      "path": "/api/deletetoken"
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/zip"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/"
+    },
+    {
+      "method": "POST",
+      "path": "/users/login"
+    },
+    {
+      "method": "POST",
+      "path": "/users/logout"
+    },
+    {
+      "method": "POST",
+      "path": "/users/register"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/admin/attachment-settings"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/admin/orgs/:orgId/features"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/admin/orgs/features"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/admin/teams/:teamId/features"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/admin/teams/features"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/cardSettings"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/cards/:cardId/checklists/:checklistId/items/:itemId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/cards/:cardId/dependencies/:targetId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/custom-fields/:customFieldId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/custom-fields/:customFieldId/dropdown-items/:dropdownItemId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/integrations/:intId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/labels"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/lists/:listId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/lists/:listId/cards/:cardId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/rules/:ruleId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/swimlanes/:swimlaneId"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/boards/:boardId/title"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/settings"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/users/:userId"
+    }
+  ],
+  "collections": [
+    "accessibilitySettings",
+    "accountSettings",
+    "actions",
+    "activities",
+    "announcements",
+    "attachmentBulkMoveStatus",
+    "attachmentMigrationStatus",
+    "attachmentStorageSettings",
+    "backupSettings",
+    "boardCardLoadingModes",
+    "boardListCardCounts",
+    "boards",
+    "brandingImageImports",
+    "card_comment_reactions",
+    "card_comments",
+    "cards",
+    "cfs.attachments.filerecord",
+    "cfs.avatars.filerecord",
+    "cfs_gridfs.attachments.files",
+    "cfs_gridfs.avatars.files",
+    "changeHistory",
+    "checklistItems",
+    "checklists",
+    "counters",
+    "customFields",
+    "documentPreviews",
+    "eventlog",
+    "eventlogAcks",
+    "fileIntegrity",
+    "fileIntegrityKeys",
+    "impersonatedUsers",
+    "integrations",
+    "invitation_codes",
+    "inviteToBoardRolesSettings",
+    "lists",
+    "lockoutSettings",
+    "loginAddresses",
+    "migrations",
+    "org",
+    "orgUser",
+    "positionHistory",
+    "presences",
+    "recoveryEvents",
+    "recoveryStatus",
+    "rules",
+    "sessiondata",
+    "settings",
+    "swimlanes",
+    "tableVisibilityModeSettings",
+    "team",
+    "text_migration_status",
+    "translation",
+    "trello_api_credentials",
+    "trello_import_jobs",
+    "triggers",
+    "unsaved-edits",
+    "userPositionHistory"
+  ],
+  "schemaUpgradeSteps": [
+    "archived-flag-backfill",
+    "swimlane-structure",
+    "merge-per-swimlane-lists",
+    "checklist-items-embedded",
+    "customfields-boardIds",
+    "board-allows-defaults",
+    "attachment-kind-flags",
+    "board-members-isactive",
+    "board-permission-lowercase",
+    "nonfinite-sort-repair",
+    "checklist-minicard-unset",
+    "fs-path-heal"
+  ],
+  "implementedREST": [
+    "POST /users/login (local password only)",
+    "POST /users/logout",
+    "GET /api/boards/:boardId"
+  ],
+  "implementedMigrations": [
+    "checklist-minicard-unset (opt-in; global marker untouched)"
+  ]
+}
