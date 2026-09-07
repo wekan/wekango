@@ -43,6 +43,28 @@ The embedded preview page supports local-password sign-in and authorized board
 reads. It is not the complete Meteor browser bundle. Missing functionality is
 listed in the roadmap; absent APIs do not silently accept writes.
 
+## Startup schema upgrades
+
+The twelve current steps from `server/lib/schemaUpgradeSteps.js` run in the
+background after HTTP starts. `/schema-upgrade-status` shows progress; append
+`?json` for machine-readable state. The dashboard uses the existing product name
+from settings and is public and read-only, matching Meteor WeKan.
+
+The `_wekan_migration` collection and `schema-upgrade` marker retain the original
+per-step history and `lastCheck: {version, at}` shape. A successful recheck skips
+on subsequent boots of that version. Failed steps or unresolved files leave the
+version unstamped and retry on the next boot. `WEKAN_FORCE_SCHEMA_UPGRADE=true`
+forces a recheck; `WEKAN_SKIP_SCHEMA_UPGRADE=true` skips background upgrades.
+The separate `checklist-minicard-unset` marker remains once-ever, so later user
+choices survive forced rechecks. Shutdown cancels and joins the upgrade before
+closing its database connection.
+
+Historical attachment/avatar recovery copies or repoints known filesystem
+versions using the existing WeKan candidate paths. Existing recorded paths,
+source files, checksums and explicit storage choices are preserved. This does
+not implement the older CFS/GridFS conversion or the full historical Meteor
+migration chain; those remain in ROADMAP.md.
+
 ## Build, test and release
 
 Use the repository `build.sh` and [release instructions](../scripts/release/README.md).
@@ -75,3 +97,23 @@ path exported. Linux CI installs browser system dependencies using
 existing compatible WeKan Playwright installation. Test users exist only in the
 new disposable fixture. Stop the process before removing that exact fixture
 folder.
+
+## Compare migration behavior with WeKan
+
+The differential suite runs the original JavaScript pipeline and the Go pipeline
+against separate databases in one disposable embedded FerretDB. It compares
+logical documents, step results, dashboard state and marker history. Generated
+IDs are normalized while checking their shape and relationships; generated dates
+are normalized while checking BSON date types. Existing IDs and dates must match.
+
+```sh
+npm ci --prefix tests
+WEKAN_SOURCE_ROOT=/path/to/wekan \
+  WEKAN_MONGODB_MODULE="$PWD/tests/node_modules/mongodb" \
+  go test -race ./internal/migrations -run TestSchemaSourceDifferential -count=1
+```
+
+CI checks out the pinned reference source without installing Meteor. Ordinary
+`go test ./...` explicitly skips this differential test when the reference source
+is unavailable; the real SQLite unit and integration tests still run. The source
+comparison is required before changing migration behavior or its reference pin.

@@ -57,7 +57,7 @@ with `python3 scripts/sync-compatibility.py /path/to/wekan` and review its diff.
 | Password hashing | golang.org/x/crypto v0.56.0 | Existing Meteor SHA256-then-bcrypt local password verification; other mechanisms remain gated |
 | Environment and files | Go standard library | Bundle `PORT=8080`; `ROOT_URL`; external `MONGO_URL`; `WRITABLE_PATH`; `FERRETDB_SQLITE_DIR` / `FERRETDB_SQLITE_URL`; attachment/avatar paths |
 | REST slice | Project-owned Go handlers | Local-password login, logout/revocation, authorized board read; full REST parity pending |
-| Migration slice | Project-owned Go implementation | Opt-in `checklist-minicard-unset`, exact one-time marker; does not set global schema-upgrade completion |
+| Current schema upgrades | Project-owned Go implementation | All twelve current steps, version-gated background startup, exact one-time checklist marker, historical file path recovery and live HTML/JSON dashboard; older Meteor migration history remains pending |
 | Release automation | `build.sh` + GitHub Actions | FerretDB's 25 candidate targets; checksums, native smoke CI, pinned actions, dependency audit, human-triggered draft release |
 | License/security evidence | `scripts/dependency-audit/check.sh` | Exact dependency closure, notices, MPL source snapshots, govulncheck; full release audit must pass on every target |
 
@@ -83,7 +83,8 @@ SQLite must have one owner while testing a binary replacement. FerretDB may appl
 its own index-metadata upgrades when it opens older files; same storage engine
 is not a promise of downgrade compatibility. Tests use independent fixtures,
 not the live Meteor development database. Uploaded-file **path calculation** is
-implemented; file download/upload/migration handlers are still pending.
+implemented, including current schema-upgrade filesystem path healing. File
+download/upload handlers and historical CFS/GridFS conversion remain pending.
 
 ## Progress log — 2026-09-07
 
@@ -94,25 +95,42 @@ implemented; file download/upload/migration handlers are still pending.
 - [x] Pin current core dependencies and audit license compatibility.
 - [x] Embed the actual FerretDB library and prove same-file read/update/reopen.
 - [x] Add path/configuration positive and negative tests.
-- [x] Implement one exact idempotent migration with source fixture and markers.
+- [x] Port all twelve current schema-upgrade steps with real SQLite fixtures,
+  preserving archive/template/shared-list rules, stored false/null values,
+  embedded checklist recovery and attachment metadata/path repair.
+- [x] Enable background startup, skip/force environment flags, clean-only version
+  stamps and `/schema-upgrade-status` HTML/JSON progress. Preserve the checklist
+  once-ever marker even during forced version rechecks.
+- [x] Verify missing-volume retry, failure continuation, concurrent status reads,
+  restart version gating, graceful shutdown and dashboard escaping.
 - [x] Verify the REST session/board slice and embedded preview page.
 - [x] Native Linux ARM64 executable, checksum/version and Chromium/Firefox smoke checks pass.
 - [x] Add cross-build orchestration, checksum and invalid-target tests.
 - [x] Validate workflow syntax with actionlint; do not dispatch workflows.
 - [x] Native symbol vulnerability scan and all 25 target package/license scans pass; notices/source archive generated.
-- [x] Cross-compile all 25 FerretDB-named targets locally and verify every checksum.
+- [x] Cross-compile all 25 FerretDB-named targets locally and verify every checksum,
+  repeated after integrating the full current schema-upgrade pipeline.
 - [ ] Run non-Linux-ARM64 binaries natively in CI before runtime certification.
 
 ## Verification evidence
 
 - `go test ./...` passes on Linux ARM64 against isolated embedded SQLite fixtures.
 - `go test -race ./internal/api ./internal/database ./internal/migrations` passes.
+- The source differential suite compares current JavaScript and Go pipelines on
+  the same FerretDB engine, including full documents, step counters, dashboard
+  state and marker history across initial, gated, forced and new-version runs.
+  It requires the reference WeKan checkout and is registered explicitly in CI.
+  Generated IDs/dates are normalized with type/shape checks; this suite is still
+  a fixture set, not proof of every historical deployment or old migration.
 - The built native executable is statically linked; version stamping and its
   per-binary SHA256 file verify.
 - `tests/browser.cjs` passes in Chromium and Firefox against the real executable:
   embedded page, wrong-password rejection, existing Meteor bcrypt login, and an
   authorized board stored in SQLite before wekango startup. Credentials remain
-  in memory. This is a preview-page check, not the full Meteor UI suite.
+  in memory. Both browsers also verify the actual twelve-step startup dashboard.
+  `tests/startup.cjs` restarts the built executable against the same disposable
+  SQLite files and verifies persisted gating, skip/force flags and clean shutdown.
+  These are preview-page checks, not the full Meteor UI suite.
 - Dependency audit covers all 25 candidate targets: 204-row license union and
   zero imported-package vulnerability findings. Native reachable-symbol scan
   passes. The unimported, unsupported `x/crypto/openpgp` module advisory is
@@ -127,9 +145,9 @@ implemented; file download/upload/migration handlers are still pending.
 1. **Compatibility harness and migration safety**
    - Add differential fixtures against Meteor WeKan and the supported FerretDB
      version for every route, method, publication, migration and environment flag.
-   - Port all twelve schema-upgrade steps, old migration history, startup repairs,
-     filesystem path healing and progress dashboard. Test interrupted upgrades,
-     dry-run reporting, repeated runs and mixed legacy data without changing markers.
+   - Port the older Meteor migration history and remaining startup repairs beyond
+     the twelve current schema-upgrade steps. Expand interrupted-upgrade and mixed
+     historical deployment fixtures, plus read-only migration planning.
    - Expand filesystem tests to Windows launcher exceptions, Snap, Sandstorm,
      custom storage settings, old CFS/GridFS records and container mounts.
 2. **Accounts and authorization parity**

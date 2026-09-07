@@ -31,7 +31,8 @@ result = {
     'collections': sorted(collections),
     'schemaUpgradeSteps': steps,
     'implementedREST': ['POST /users/login (local password only)', 'POST /users/logout', 'GET /api/boards/:boardId'],
-    'implementedMigrations': ['checklist-minicard-unset (opt-in; global marker untouched)'],
+    'implementedMigrations': steps,
+    'migrationScope': 'current twelve-step schema-upgrade pipeline only; older Meteor migration history remains pending',
 }
 target.write_text(json.dumps(result, indent=2) + '\n')
 print(f'{len(env)} environment names, {len(routes)} REST routes, {len(collections)} literal collections, {len(steps)} schema steps')

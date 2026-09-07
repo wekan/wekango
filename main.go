@@ -101,7 +101,9 @@ func run() error {
 		fmt.Printf("checklist-minicard-unset: %d documents changed\n", n)
 		return nil
 	}
-	// Additional migration steps are intentionally not marked completed here.
+	schema := migrations.NewSchemaRunner(migrations.FilesystemOptions{WritablePath: cfg.WritablePath, Log: func(message string) {
+		slog.Info("schema-upgrade", "message", message)
+	}})
 	apiOptions := api.Options{WithAPI: cfg.WithAPI, LoginExpiration: cfg.LoginExpiration, HTTPForwardedCount: 1}
 	if n, err := envPositive("REST_LOGIN_MAX_FAILURES", 10); err != nil {
 		return err
@@ -120,6 +122,7 @@ func run() error {
 	}
 	apiHandler := api.New(db, apiOptions)
 	mux := http.NewServeMux()
+	mux.Handle("GET /schema-upgrade-status", schema.Handler())
 	mux.Handle("/api/", apiHandler)
 	mux.Handle("/users/", apiHandler)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +161,24 @@ func run() error {
 		return err
 	}
 	defer transport.Stop()
+	if os.Getenv("WEKAN_SKIP_SCHEMA_UPGRADE") != "true" {
+		upgradeCtx, cancelUpgrade := context.WithCancel(ctx)
+		upgradeDone := make(chan struct{})
+		go func() {
+			defer close(upgradeDone)
+			_, err := schema.Run(upgradeCtx, db, migrations.UpgradeOptions{
+				AppVersion: version.Version, Force: os.Getenv("WEKAN_FORCE_SCHEMA_UPGRADE") == "true",
+				Log: func(message string) { slog.Info("schema-upgrade", "message", message) },
+			})
+			if err != nil {
+				slog.Error("schema upgrade will retry next start", "error", err)
+			}
+		}()
+		// Stop and join the upgrade before disconnecting its client or SQLite storage.
+		defer func() { cancelUpgrade(); <-upgradeDone }()
+	} else {
+		slog.Info("schema upgrade skipped", "WEKAN_SKIP_SCHEMA_UPGRADE", true)
+	}
 	slog.Info("WeKan Go compatibility preview started", "url", cfg.RootURL, "version", version.Version, "external_database", cfg.MongoURL != "")
 	select {
 	case <-ctx.Done():

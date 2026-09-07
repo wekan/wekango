@@ -761,6 +761,18 @@
     "GET /api/boards/:boardId"
   ],
   "implementedMigrations": [
-    "checklist-minicard-unset (opt-in; global marker untouched)"
-  ]
+    "archived-flag-backfill",
+    "swimlane-structure",
+    "merge-per-swimlane-lists",
+    "checklist-items-embedded",
+    "customfields-boardIds",
+    "board-allows-defaults",
+    "attachment-kind-flags",
+    "board-members-isactive",
+    "board-permission-lowercase",
+    "nonfinite-sort-repair",
+    "checklist-minicard-unset",
+    "fs-path-heal"
+  ],
+  "migrationScope": "current twelve-step schema-upgrade pipeline only; older Meteor migration history remains pending"
 }

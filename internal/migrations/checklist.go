@@ -1,5 +1,5 @@
-// Package migrations ports individual WeKan upgrade steps. A step here does not
-// imply that the complete startup upgrade pipeline has run.
+// Package migrations ports the current WeKan schema upgrade pipeline. Historical
+// Meteor application migrations remain tracked separately in ROADMAP.md.
 package migrations
 
 import (
@@ -15,11 +15,28 @@ import (
 
 const checklistMarker = "checklist-minicard-unset"
 
+// CheckChecklistMinicard preserves the once-ever marker, including after a forced
+// full schema re-check: later false values are user choices, not old defaults.
+func CheckChecklistMinicard(ctx context.Context, db *mongo.Database) (bool, error) {
+	projection := options.FindOne().SetProjection(bson.M{"_id": 1})
+	err := db.Collection(MarkerCollection).FindOne(ctx, bson.M{"_id": checklistMarker}, projection).Err()
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, mongo.ErrNoDocuments) {
+		return false, err
+	}
+	err = db.Collection("checklists").FindOne(ctx, bson.M{"showChecklistAtMinicard": false}, projection).Err()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // RunChecklistMinicard performs the check and run phases from WeKan's
 // server/lib/schemaUpgradeSteps.js (snapshot in testdata). It preserves the exact
 // one-time _wekan_migration marker, and never writes the schema-upgrade marker.
-// Call only while application writers and other migration runners are stopped.
-// This function is deliberately opt-in until the entire startup pipeline ports.
+// Do not invoke concurrently with another migration runner.
 func RunChecklistMinicard(ctx context.Context, db *mongo.Database) (int64, error) {
 	markers := db.Collection("_wekan_migration")
 	projection := options.FindOne().SetProjection(bson.M{"_id": 1})

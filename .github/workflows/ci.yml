@@ -82,6 +82,19 @@ jobs:
           mkdir -p "$TMPDIR"
           npm ci --prefix tests
           npx --prefix tests playwright install --with-deps chromium firefox
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wekan/wekan
+          ref: 2037d4acb32b12a9de35fbcbba506801371d751c
+          path: .tools/wekan-reference
+          persist-credentials: false
+      - name: Compare Go migrations with the actual WeKan source
+        run: |
+          export TMPDIR="$PWD/.tools/tmp"
+          mkdir -p "$TMPDIR"
+          WEKAN_SOURCE_ROOT="$PWD/.tools/wekan-reference" \
+            WEKAN_MONGODB_MODULE="$PWD/tests/node_modules/mongodb" \
+            go test -race ./internal/migrations -run TestSchemaSourceDifferential -count=1
       - name: Verify existing SQLite board in Chromium and Firefox
         run: |
           set -euo pipefail
@@ -102,6 +115,11 @@ jobs:
           done
           if [[ "$ready" != true ]]; then cat "$TMPDIR/browser/server.log"; exit 1; fi
           WEKANGO_SCREENSHOTS="$TMPDIR/browser/screenshots" node tests/browser.cjs
+          kill "$server_pid"
+          wait "$server_pid"
+          trap - EXIT
+          WEKANGO_BINARY="$PWD/dist/wekan-amd64" \
+            WEKANGO_TEST_DATA="$TMPDIR/browser/data" node tests/startup.cjs
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

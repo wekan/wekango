@@ -176,4 +176,8 @@ The separate `tests/package-lock.json` pins `@playwright/test` v1.63.0
 against the npm registry on 2026-09-07. It is a development dependency, not code
 linked into the Go executable. Its Chromium/Firefox downloads are external test
 tools, not bundled application dependencies. `npm audit` reports no findings for
-this locked four-package test graph.
+this locked sixteen-package test graph. The test-only MongoDB Node driver is
+pinned to v7.6.0 (Apache-2.0), matching the reference WeKan driver. It executes
+the original JavaScript migrations for differential fixtures; it is not bundled
+or launched by the Go product. Its transitive packages use Apache-2.0, MIT, BSD
+or ISC licenses. The CI reference source is pinned to WeKan `2037d4acb32b12a9de35fbcbba506801371d751c`.
