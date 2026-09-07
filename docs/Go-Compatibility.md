@@ -38,7 +38,8 @@ headers, as in Meteor WeKan.
 Caddy resolves the client before rewriting forwarding headers and overwrites
 `X-Wekan-Client-IP` for the private application listener. An external client
 cannot choose that private identity header. Do not include the in-process Caddy
-to application hop in `HTTP_FORWARDED_COUNT`. This slice covers REST throttling;
+to application hop in `HTTP_FORWARDED_COUNT`. This covers REST throttling and
+API usage reports;
 DDP and other Meteor client-address consumers remain future work.
 
 ## Implemented preview commands
@@ -53,6 +54,37 @@ DDP and other Meteor client-address consumers remain future work.
 The embedded preview page supports local-password sign-in and authorized board
 reads. It is not the complete Meteor browser bundle. Missing functionality is
 listed in the roadmap; absent APIs do not silently accept writes.
+
+## API usage reports
+
+Requests under `/api` update WeKan's existing `eventlog` collection with
+`stream: 'api'`. Rows identify the account ID and route pattern, so different
+board IDs share one endpoint row; unmatched paths share `(no route)`. The
+disabled-API gate, login routes, health checks and static files are not counted.
+This writes the existing report format; the Go Admin Panel is still pending.
+
+`WEKAN_API_USAGE_FLUSH_MS` retains the source's numeric/timer behavior, defaulting
+to ten seconds. Distinct pending account/endpoint pairs are capped at 500 with
+an overflow row, and 200 pairs trigger an early flush. Graceful shutdown joins
+the final bounded flush before closing storage. A crash or failed database write
+can lose the pending reporting window, as in the source.
+
+The current source writer ignores a batch's `count` and increments the stored
+summary once per flush. The port preserves this known discrepancy; these stored
+counts must not be interpreted as exact numbers of API requests. The accumulator
+itself counts calls correctly. Resolving the writer discrepancy is tracked in
+ROADMAP.md.
+
+Existing row IDs, first-seen timestamps and unknown fields survive updates.
+Actor tallies use the original hashed keys and fifty-actor cap. Proxy geography
+headers supply display labels only; they never determine authorization or row
+identity. The public socket/client address follows `HTTP_FORWARDED_COUNT`.
+
+With a freshly built binary, validate persisted shutdown reports locally:
+
+```sh
+TMPDIR="$PWD/.tools/tmp" WEKANGO_BINARY="$PWD/dist/wekan-arm64" node tests/api-usage.cjs
+```
 
 ## Embedded database tools
 

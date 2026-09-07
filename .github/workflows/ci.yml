@@ -94,7 +94,7 @@ jobs:
           ref: 2037d4acb32b12a9de35fbcbba506801371d751c
           path: .tools/wekan-reference
           persist-credentials: false
-      - name: Compare Go migrations and client addresses with the actual WeKan source
+      - name: Compare migrations, client addresses and reports with WeKan source
         run: |
           export TMPDIR="$PWD/.tools/tmp"
           mkdir -p "$TMPDIR"
@@ -103,6 +103,8 @@ jobs:
             go test -race ./internal/migrations -run TestSchemaSourceDifferential -count=1
           WEKAN_SOURCE_ROOT="$PWD/.tools/wekan-reference" \
             go test -race ./internal/clientip -run TestSourceClientKeyDifferential -count=1
+          WEKAN_SOURCE_ROOT="$PWD/.tools/wekan-reference" \
+            go test -race ./internal/eventlog -count=1
       - name: Verify existing SQLite board in Chromium and Firefox
         run: |
           set -euo pipefail
@@ -111,6 +113,7 @@ jobs:
           ./build.sh build amd64
           WEKANGO_BINARY="$PWD/dist/wekan-amd64" python3 tests/database-tools.py
           WEKANGO_BINARY="$PWD/dist/wekan-amd64" node tests/clientip.cjs
+          WEKANGO_BINARY="$PWD/dist/wekan-amd64" node tests/api-usage.cjs
           go run ./tests/browserfixture "$TMPDIR/browser/data/files/db"
           PORT=3900 ROOT_URL=http://127.0.0.1:3900 BIND_IP=127.0.0.1 \
             WRITABLE_PATH="$TMPDIR/browser/data" \

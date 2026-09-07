@@ -785,5 +785,5 @@
     "fs-path-heal"
   ],
   "migrationScope": "current twelve-step schema-upgrade pipeline only; older Meteor migration history remains pending",
-  "restScope": "registered handler slice; common usage accounting, historical date formats and complete middleware parity remain pending"
+  "restScope": "registered handler slice with shared eventlog usage reporting; inherited per-flush count discrepancy, historical date formats and complete middleware parity remain pending"
 }

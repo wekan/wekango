@@ -126,6 +126,12 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   headers have source differential and real transport regression coverage.
 - [x] Add ten board/list/swimlane/card read handlers, preserving route-specific
   projections, archive filters, role checks, errors and missing-resource output.
+- [x] Record API use through the existing `eventlog` summary schema, with bounded
+  in-memory batching, account/route-pattern identity, proxy-derived addresses,
+  display-only geography, bounded actor tallies and shutdown flushing.
+- [ ] Resolve the inherited source writer's batch-count discrepancy: it currently
+  increments once per flush, ignoring the producer's accumulated `count`. This
+  port preserves that observed behavior; stored counts are not exact call totals.
 - [ ] Fix pinned FerretDB monitoring gaps: fractional serverStatus `uptime`
   cannot decode in upstream `mongostat`; the `top` command is not implemented.
 - [ ] Complete external MongoDB/authentication and every tools-option matrix.
@@ -147,6 +153,13 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   `tests/clientip.cjs` passes against a freshly built native ARM64 executable:
   counts 0, 1, 2 and `0x2`, ten-failure lockout, distinct trusted clients,
   insufficient-hop fallback, forged private/public headers and clean shutdown.
+- Event-report source differentials cover summary identities/modifiers, legacy
+  folds, usage overflow, 69 geography fixtures and 27 timer cases. Race tests
+  verify 80 concurrent writes, actor-cap hydration after restart, cache bounds,
+  existing row preservation and reporter shutdown. Native `tests/api-usage.cjs`
+  verifies route grouping and reads shutdown-flushed SQLite reports through the
+  same executable's `mongoexport` command. The inherited per-flush count behavior
+  is explicitly asserted; no exact request-count claim is made.
 - The built native executable is statically linked; version stamping and its
   per-binary SHA256 file verify.
 - `tests/browser.cjs` passes in Chromium and Firefox against the real executable:
@@ -185,9 +198,12 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
    - Extend the implemented `HTTP_FORWARDED_COUNT` REST throttle behavior to
      DDP and other client-address consumers when those surfaces are ported.
 3. **One real interactive board slice**
-   - Finish user-board listing's security-event folding and shared API usage
-     accounting; extend informal legacy activity-date parsing beyond tested
+   - Finish user-board listing's security logging and account-blocking side
+     effects using the implemented shared fold; resolve API batched counts and
+     extend informal legacy activity-date parsing beyond tested
      BSON, numeric, ISO and RFC formats.
+   - Expand legacy event folding's malformed counter/date coercions and test
+     actor display sorting beyond the verified English Unicode collation.
    - Port lists/cards/swimlanes, roles and all side effects: create, move, archive,
      activities, rules, notifications, hooks and indexing.
    - Implement authorized DDP/SockJS subscriptions with added/changed/removed,

@@ -21,6 +21,7 @@ import (
 	"github.com/wekan/wekango/internal/compatibility"
 	"github.com/wekan/wekango/internal/config"
 	"github.com/wekan/wekango/internal/database"
+	"github.com/wekan/wekango/internal/eventlog"
 	"github.com/wekan/wekango/internal/migrations"
 	"github.com/wekan/wekango/internal/transport"
 	"github.com/wekan/wekango/internal/version"
@@ -123,10 +124,14 @@ func run() error {
 	} else {
 		apiOptions.LoginLockout = time.Duration(n) * time.Second
 	}
+	usage := eventlog.NewDatabaseReporter(db, eventlog.UsageFlushInterval(os.Getenv("WEKAN_API_USAGE_FLUSH_MS")))
+	defer usage.Close()
+	apiOptions.Usage = usage
 	apiHandler := api.New(db, apiOptions)
 	mux := http.NewServeMux()
 	mux.Handle("GET /schema-upgrade-status", schema.Handler())
 	mux.Handle("/api/", apiHandler)
+	mux.Handle("/api", apiHandler)
 	mux.Handle("/users/", apiHandler)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		c, cancel := context.WithTimeout(r.Context(), 2*time.Second)

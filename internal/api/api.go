@@ -17,12 +17,14 @@ import (
 	"time"
 
 	"github.com/wekan/wekango/internal/clientip"
+	"github.com/wekan/wekango/internal/eventlog"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type Options struct {
+	Usage                 *eventlog.Reporter
 	TrustedClientIPHeader bool
 	WithAPI               bool
 	LoginExpiration       time.Duration
@@ -105,7 +107,16 @@ func New(db *mongo.Database, opts Options) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
-		mux.ServeHTTP(w, r.WithContext(ctx))
+		routed := r.WithContext(ctx)
+		userID := ""
+		count := opts.Usage != nil && eventlog.IsAPIRequest(r.URL.RequestURI())
+		if count {
+			userID = s.usageUserID(routed)
+		}
+		mux.ServeHTTP(w, routed)
+		if count {
+			s.recordUsage(routed, userID)
+		}
 	})
 }
 func reply(w http.ResponseWriter, status int, value any) {

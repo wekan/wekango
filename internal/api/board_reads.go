@@ -19,8 +19,8 @@ import (
 // registerBoardReads ports the read handlers in server/models/{boards,lists,
 // swimlanes,cards}.js. The existing single-board handler is registered by New.
 // The user-board listing remains unregistered until its revoked-membership
-// security-event folding dependency ports. Generic API usage accounting remains
-// part of the wider middleware port.
+// security-event and account-blocking dependencies port. Shared API usage
+// accounting wraps all routes in api.go.
 func (s *service) registerBoardReads(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/boards", s.publicBoards)
 	mux.HandleFunc("GET /api/boards_count", s.boardCounts)
