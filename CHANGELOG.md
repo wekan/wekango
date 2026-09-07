@@ -2,6 +2,14 @@
 
 # Upcoming WeKan ® release
 
+- [Preserve user board listing authorization and revoked-access reports](https://github.com/wekan/wekango/commit/ebaacc4).
+  Thanks to xet7.
+  List active, unarchived boards for the caller or an administrator, with the
+  existing helper-title exclusions. Withhold revoked memberships and fold the
+  source-compatible medium-severity report without blocking accounts or exposing
+  board details. Database, race and actual-source policy tests pass, together
+  with Chromium and Firefox authorization checks.
+
 - [Make login query and password verification security boundaries explicit](https://github.com/wekan/wekango/commit/b28f0b6).
   Thanks to xet7.
   Review the saved CodeQL injection and weak-password-hash findings. Login uses
