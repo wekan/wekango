@@ -2,6 +2,16 @@
 
 # Upcoming WeKan ® release
 
+- [Preserve self and admin user REST reads with credential redaction](https://github.com/wekan/wekango/commit/94a0623).
+  Thanks to xet7.
+  Add the self-profile, admin user-list and admin detail endpoints with the
+  source's ID-before-username lookup, field projections and membership summaries.
+  Preserve missing/malformed-data errors and strip credential subtrees without
+  modifying stored users or boards. Optional trailing slashes share canonical
+  usage rows. Forty-five real-database comparisons against the JavaScript
+  handlers, race tests and Chromium/Firefox checks pass. The manifest and roadmap
+  now record seventeen implemented REST operations; user writes remain pending.
+
 - [Preserve security-event summaries and account-specific blocking](https://github.com/wekan/wekango/commit/d4bc664).
   Thanks to xet7.
   Port the 54-category catalog, detail sanitizer, field precedence and existing
