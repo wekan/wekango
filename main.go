@@ -107,7 +107,7 @@ func run() error {
 	schema := migrations.NewSchemaRunner(migrations.FilesystemOptions{WritablePath: cfg.WritablePath, Log: func(message string) {
 		slog.Info("schema-upgrade", "message", message)
 	}})
-	apiOptions := api.Options{WithAPI: cfg.WithAPI, LoginExpiration: cfg.LoginExpiration, HTTPForwardedCount: 1}
+	apiOptions := api.Options{WithAPI: cfg.WithAPI, LoginExpiration: cfg.LoginExpiration, TrustedClientIPHeader: true}
 	if n, err := envPositive("REST_LOGIN_MAX_FAILURES", 10); err != nil {
 		return err
 	} else {

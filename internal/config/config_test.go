@@ -52,3 +52,17 @@ func TestInvalidConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestForwardedCountUsesSourceIntegerPrefix(t *testing.T) {
+	for value, want := range map[string]int64{"": 0, "0": 0, "2": 2, "  +2proxies": 2, "0x2": 0, "+0X2": 0, "08": 8, "bad": 0, "-2": 0} {
+		c, err := Load(func(k string) string {
+			if k == "HTTP_FORWARDED_COUNT" {
+				return value
+			}
+			return ""
+		}, "bundle")
+		if err != nil || c.HTTPForwardedCount != want {
+			t.Fatalf("%q: %d %v", value, c.HTTPForwardedCount, err)
+		}
+	}
+}

@@ -10,25 +10,26 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/wekan/wekango/internal/clientip"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type Options struct {
-	WithAPI            bool
-	LoginExpiration    time.Duration
-	LoginMaxFailures   int
-	LoginFailureWindow time.Duration
-	LoginLockout       time.Duration
-	HTTPForwardedCount int
+	TrustedClientIPHeader bool
+	WithAPI               bool
+	LoginExpiration       time.Duration
+	LoginMaxFailures      int
+	LoginFailureWindow    time.Duration
+	LoginLockout          time.Duration
+	HTTPForwardedCount    int
 }
 
 type service struct {
@@ -214,21 +215,12 @@ func decodeBody(w http.ResponseWriter, r *http.Request) (map[string]any, error) 
 	return values, nil
 }
 func (s *service) clientKey(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	count := s.options.HTTPForwardedCount
-	if count > 0 {
-		chain := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-		if len(chain) >= count {
-			candidate := strings.TrimSpace(chain[len(chain)-count])
-			if net.ParseIP(candidate) != nil {
-				host = candidate
-			}
+	if s.options.TrustedClientIPHeader {
+		if key := r.Header.Get(clientip.Header); key != "" {
+			return key
 		}
 	}
-	return host
+	return clientip.Resolve(r.Header, r.RemoteAddr, int64(s.options.HTTPForwardedCount))
 }
 
 // begin/finish bound retained state and serialize password work per address.

@@ -275,3 +275,21 @@ func TestMeteorDateJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestIngressIdentityRequiresPrivateTransportOptIn(t *testing.T) {
+	s := &service{options: Options{}}
+	r := httptest.NewRequest("POST", "/users/login", nil)
+	r.RemoteAddr = "192.0.2.1:80"
+	r.Header.Set("X-Wekan-Client-IP", "client-via-proxy")
+	if got := s.clientKey(r); got != "192.0.2.1" {
+		t.Fatal("accepted external private header", got)
+	}
+	s.options.TrustedClientIPHeader = true
+	if got := s.clientKey(r); got != "client-via-proxy" {
+		t.Fatal(got)
+	}
+	r.Header.Del("X-Wekan-Client-IP")
+	if got := s.clientKey(r); got != "192.0.2.1" {
+		t.Fatal("missing ingress fallback", got)
+	}
+}

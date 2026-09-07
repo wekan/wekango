@@ -120,6 +120,10 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
 - [x] Verify real BSON/archive dump/restore, canonical JSON export/import and
   GridFS put/get/delete byte round trips against FerretDB. Native executable
   tests also exercise default SQLite paths and explicit connection failures.
+- [x] Preserve `HTTP_FORWARDED_COUNT` for REST login throttling, resolving the
+  public socket/header chain before Caddy's private proxy hop and overwriting
+  the private identity header. Decimal parsing, fallback behavior and injected
+  headers have source differential and real transport regression coverage.
 - [x] Add ten board/list/swimlane/card read handlers, preserving route-specific
   projections, archive filters, role checks, errors and missing-resource output.
 - [ ] Fix pinned FerretDB monitoring gaps: fractional serverStatus `uptime`
@@ -137,6 +141,12 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   It requires the reference WeKan checkout and is registered explicitly in CI.
   Generated IDs/dates are normalized with type/shape checks; this suite is still
   a fixture set, not proof of every historical deployment or old migration.
+- Client-address differential coverage compares 90 fixtures against WeKan's
+  actual REST resolver. Race-tested Caddy transport coverage exercises 64
+  network cases, including repeated headers and private-header injection.
+  `tests/clientip.cjs` passes against a freshly built native ARM64 executable:
+  counts 0, 1, 2 and `0x2`, ten-failure lockout, distinct trusted clients,
+  insufficient-hop fallback, forged private/public headers and clean shutdown.
 - The built native executable is statically linked; version stamping and its
   per-binary SHA256 file verify.
 - `tests/browser.cjs` passes in Chromium and Firefox against the real executable:
@@ -172,9 +182,8 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
    - Preserve native HttpOnly cookie routes, CSRF/origin checks, expiry/revocation
      and cross-tab/reconnect behavior. Preview browser bearer storage is temporary
      memory only and is not the final Meteor session implementation.
-   - Port `HTTP_FORWARDED_COUNT` with explicitly trusted proxy handling. Until then
-     a nonzero value is rejected rather than silently ignored; Caddy's private
-     internal hop is accounted for by the API throttle.
+   - Extend the implemented `HTTP_FORWARDED_COUNT` REST throttle behavior to
+     DDP and other client-address consumers when those surfaces are ported.
 3. **One real interactive board slice**
    - Finish user-board listing's security-event folding and shared API usage
      accounting; extend informal legacy activity-date parsing beyond tested

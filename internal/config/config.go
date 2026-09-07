@@ -9,9 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wekan/wekango/internal/clientip"
 )
 
 type Config struct {
+	HTTPForwardedCount                                                                int64
 	Port, BindIP, RootURL, Prefix                                                     string
 	MongoURL, Database                                                                string
 	WritablePath, FilesPath, AttachmentsPath, AvatarsPath, SQLiteDirectory, SQLiteURL string
@@ -51,9 +54,7 @@ func Load(getenv func(string) string, executableDir string) (Config, error) {
 	if c.AutoHTTPS && u.Scheme != "https" {
 		return c, fmt.Errorf("CADDY_AUTO_HTTPS requires an HTTPS ROOT_URL")
 	}
-	if forwarded := getenv("HTTP_FORWARDED_COUNT"); forwarded != "" && forwarded != "0" {
-		return c, fmt.Errorf("HTTP_FORWARDED_COUNT is not supported in this compatibility preview; trusted external proxy configuration is pending")
-	}
+	c.HTTPForwardedCount = clientip.Count(getenv("HTTP_FORWARDED_COUNT"))
 	c.Prefix = strings.TrimRight(u.Path, "/")
 	if c.WritablePath == "" {
 		c.WritablePath = filepath.Join(executableDir, "data")

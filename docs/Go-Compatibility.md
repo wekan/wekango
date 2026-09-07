@@ -27,8 +27,19 @@ Caddy normally serves plain HTTP on `PORT`, preserving Meteor deployments whose
 explicitly to let Caddy manage TLS; then use an HTTPS ROOT_URL and an appropriate
 port (443 by default). Certificate storage is under `WRITABLE_PATH/caddy`.
 The Caddy admin API and automatic config persistence are disabled.
-Trusted external proxy configuration / nonzero `HTTP_FORWARDED_COUNT` is pending
-and currently rejected. The private Caddy-to-app hop is trusted for rate limiting.
+`HTTP_FORWARDED_COUNT` now preserves the REST login throttle's WeKan semantics:
+positive decimal prefixes select that many nonempty `X-Forwarded-For` entries
+from the right; missing, zero, negative or invalid values use the socket peer.
+`0x2` is zero because the source parses in radix 10. A chain shorter than the
+configured count also falls back to the socket. Configure the count for your
+trusted external proxy chain and ensure those proxies control the forwarded
+headers, as in Meteor WeKan.
+
+Caddy resolves the client before rewriting forwarding headers and overwrites
+`X-Wekan-Client-IP` for the private application listener. An external client
+cannot choose that private identity header. Do not include the in-process Caddy
+to application hop in `HTTP_FORWARDED_COUNT`. This slice covers REST throttling;
+DDP and other Meteor client-address consumers remain future work.
 
 ## Implemented preview commands
 
@@ -144,9 +155,27 @@ npm ci --prefix tests
 WEKAN_SOURCE_ROOT=/path/to/wekan \
   WEKAN_MONGODB_MODULE="$PWD/tests/node_modules/mongodb" \
   go test -race ./internal/migrations -run TestSchemaSourceDifferential -count=1
+WEKAN_SOURCE_ROOT=/path/to/wekan \
+  go test -race ./internal/clientip -run TestSourceClientKeyDifferential -count=1
 ```
 
 CI checks out the pinned reference source without installing Meteor. Ordinary
 `go test ./...` explicitly skips this differential test when the reference source
 is unavailable; the real SQLite unit and integration tests still run. The source
 comparison is required before changing migration behavior or its reference pin.
+
+The client-address differential compares 90 count/header combinations directly
+with WeKan's `resolveClientKey`, including decimal/hex prefixes, whitespace,
+empty entries and insufficient hops. `go test -race ./internal/transport` runs
+real Caddy ingress cases. To check the newly built executable's throttle through
+its public listener and embedded database, run:
+
+```sh
+export TMPDIR="$PWD/.tools/tmp"
+mkdir -p "$TMPDIR"
+WEKANGO_BINARY="$PWD/dist/wekan-amd64" node tests/clientip.cjs
+```
+
+The runtime test creates and removes its own SQLite fixtures, checks counts 0,
+1, 2 and `0x2`, and verifies that forged public/private headers cannot split a
+locked client's throttle key. Use the binary filename for your host platform.

@@ -22,7 +22,7 @@ func Configuration(c config.Config, upstream string) ([]byte, error) {
 		"listen":              []string{net.JoinHostPort(c.BindIP, c.Port)},
 		"read_header_timeout": "10s", "idle_timeout": "2m", "max_header_bytes": 1 << 20,
 	}
-	route := map[string]any{"handle": []any{map[string]any{"handler": "reverse_proxy", "upstreams": []any{map[string]any{"dial": upstream}}}}, "terminal": true}
+	route := map[string]any{"handle": []any{map[string]any{"handler": "wekan_client_address", "forwarded_count": c.HTTPForwardedCount}, map[string]any{"handler": "reverse_proxy", "headers": map[string]any{"request": map[string]any{"set": map[string]any{"X-Wekan-Client-IP": []string{"{http.vars.wekan_client_address}"}}}}, "upstreams": []any{map[string]any{"dial": upstream}}}}, "terminal": true}
 	if c.AutoHTTPS {
 		u, _ := url.Parse(c.RootURL)
 		route["match"] = []any{map[string]any{"host": []string{u.Hostname()}}}
