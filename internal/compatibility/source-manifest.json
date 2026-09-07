@@ -758,7 +758,17 @@
   "implementedREST": [
     "POST /users/login (local password only)",
     "POST /users/logout",
-    "GET /api/boards/:boardId"
+    "GET /api/boards/:boardId",
+    "GET /api/boards (admin public-board listing)",
+    "GET /api/boards_count",
+    "GET /api/boards/:boardId/lists",
+    "GET /api/boards/:boardId/lists/:listId",
+    "GET /api/boards/:boardId/swimlanes",
+    "GET /api/boards/:boardId/swimlanes/:swimlaneId",
+    "GET /api/boards/:boardId/lists/:listId/cards",
+    "GET /api/boards/:boardId/swimlanes/:swimlaneId/cards",
+    "GET /api/cards/:cardId",
+    "GET /api/boards/:boardId/lists/:listId/cards/:cardId"
   ],
   "implementedMigrations": [
     "archived-flag-backfill",
@@ -774,5 +784,6 @@
     "checklist-minicard-unset",
     "fs-path-heal"
   ],
-  "migrationScope": "current twelve-step schema-upgrade pipeline only; older Meteor migration history remains pending"
+  "migrationScope": "current twelve-step schema-upgrade pipeline only; older Meteor migration history remains pending",
+  "restScope": "registered handler slice; common usage accounting, historical date formats and complete middleware parity remain pending"
 }

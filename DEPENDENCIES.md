@@ -169,6 +169,40 @@ require evidence and an explicit policy decision, not an automatic allowlist
 expansion. Keep the previous pin until an upgrade passes compatibility tests,
 then commit updated module checksums and audit evidence together.
 
+## Embedded MongoDB Database Tools
+
+`github.com/mongodb/mongo-tools` is pinned to
+`v0.0.0-20260903204226-5df87866650a`, the upstream development head resolved
+on 2026-09-07. [Source and license](https://github.com/mongodb/mongo-tools/tree/5df87866650a3ed661b5da6869f430a971ba25e5).
+This is the same upstream used by `mongo-tools-patches`; that repository currently
+has no applicable source patches in `dist`. All eight command entry points call
+upstream libraries within this executable. Their adapted Apache-2.0 entry points
+retain their notices and local package license; the surrounding WeKan code stays
+MIT. No MongoDB server/SSPL component is linked.
+
+The selected graph retains MongoDB Go Driver v2.9.0 and existing security pins.
+Azure azcore v1.23.1, azidentity v1.14.1 and MSAL v1.9.0 use their newest
+verified releases, including MSAL's certificate and authority-validation hardening.
+The terminal renderer is maintained tcell/v3 v3.4.2 (Apache-2.0), behind a small
+project-owned facade for the symbols used by upstream mongostat. No unmaintained
+termbox implementation is shipped. The old YAML import path forwards types and
+calls to security-maintained go.yaml.in/yaml/v2 v2.4.4; no archived YAML parser is
+shipped. Local module replacements make both facades reproducible in every build,
+and the audit rejects silently reverting those paths to their legacy backends.
+Terminal input, styles, Unicode cells, resize and lifecycle are tested against
+tcell's mock terminal; YAML configuration has positive and malformed-input tests.
+These helpers remain in the audited non-GPL dependency closure. The obsolete AWS SDK v1 module was removed by tidy;
+it is not imported into the executable.
+
+Upstream's abbreviated `LICENSE.md` is not recognized by go-licenses. The audit
+verifies the exact module path/version/checksum, package ownership and reviewed
+SHA256 values of that notice, upstream third-party notices and the full official
+Apache-2.0 license before enabling a narrowly scoped scanner exception. It still
+scans every transitive dependency and preserves all source notices. Upstream's
+verbatim third-party notice is a superset; `licenses.csv` identifies the packages
+actually linked into this executable. Changed
+module versions or license text fail until reviewed again.
+
 ## Browser test tooling
 
 The separate `tests/package-lock.json` pins `@playwright/test` v1.63.0

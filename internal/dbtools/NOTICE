@@ -1,0 +1,8 @@
+MongoDB Database Tools entry points
+Copyright (C) MongoDB, Inc. 2014-present.
+
+Adapted from https://github.com/mongodb/mongo-tools at commit
+5df87866650a3ed661b5da6869f430a971ba25e5.
+Changes replace process exits with return codes, dispatch commands from a single
+executable, and finish deferred cleanup before returning. The upstream command
+implementations are imported from the pinned module and remain Apache-2.0.

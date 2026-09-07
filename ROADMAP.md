@@ -56,7 +56,8 @@ with `python3 scripts/sync-compatibility.py /path/to/wekan` and review its diff.
 | MongoDB protocol client | Official MongoDB Go Driver v2.9.0 | External MONGO_URL or private embedded endpoint; BSON document shapes retained |
 | Password hashing | golang.org/x/crypto v0.56.0 | Existing Meteor SHA256-then-bcrypt local password verification; other mechanisms remain gated |
 | Environment and files | Go standard library | Bundle `PORT=8080`; `ROOT_URL`; external `MONGO_URL`; `WRITABLE_PATH`; `FERRETDB_SQLITE_DIR` / `FERRETDB_SQLITE_URL`; attachment/avatar paths |
-| REST slice | Project-owned Go handlers | Local-password login, logout/revocation, authorized board read; full REST parity pending |
+| REST reads | Project-owned Go handlers | Local sessions plus thirteen registered REST handlers: board, list, swimlane and card reads, admin public-board list/counts; write routes, user-board security-event side effects and full middleware parity remain pending |
+| Database utilities | MongoDB mongo-tools `v0.0.0-20260903204226-5df87866650a`, Apache-2.0 | Eight command adapters in the same process; BSON/archive/Extended JSON/GridFS round trips verified; backend monitoring gaps noted below |
 | Current schema upgrades | Project-owned Go implementation | All twelve current steps, version-gated background startup, exact one-time checklist marker, historical file path recovery and live HTML/JSON dashboard; older Meteor migration history remains pending |
 | Release automation | `build.sh` + GitHub Actions | FerretDB's 25 candidate targets; checksums, native smoke CI, pinned actions, dependency audit, human-triggered draft release |
 | License/security evidence | `scripts/dependency-audit/check.sh` | Exact dependency closure, notices, MPL source snapshots, govulncheck; full release audit must pass on every target |
@@ -110,6 +111,20 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
 - [x] Native symbol vulnerability scan and all 25 target package/license scans pass; notices/source archive generated.
 - [x] Cross-compile all 25 FerretDB-named targets locally and verify every checksum,
   repeated after integrating the full current schema-upgrade pipeline.
+- [x] Replace unmaintained terminal/YAML runtime implementations with owned
+  compatibility facades over tcell/v3 v3.4.2 and go.yaml.in/yaml/v2 v2.4.4;
+  update Azure/MSAL authentication dependencies to current verified versions.
+- [x] Embed all eight MongoDB tools as subcommands and optional command-name
+  symlinks; retain explicit upstream connection options or open configured
+  external/embedded storage without starting application writers.
+- [x] Verify real BSON/archive dump/restore, canonical JSON export/import and
+  GridFS put/get/delete byte round trips against FerretDB. Native executable
+  tests also exercise default SQLite paths and explicit connection failures.
+- [x] Add ten board/list/swimlane/card read handlers, preserving route-specific
+  projections, archive filters, role checks, errors and missing-resource output.
+- [ ] Fix pinned FerretDB monitoring gaps: fractional serverStatus `uptime`
+  cannot decode in upstream `mongostat`; the `top` command is not implemented.
+- [ ] Complete external MongoDB/authentication and every tools-option matrix.
 - [ ] Run non-Linux-ARM64 binaries natively in CI before runtime certification.
 
 ## Verification evidence
@@ -126,12 +141,12 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
   per-binary SHA256 file verify.
 - `tests/browser.cjs` passes in Chromium and Firefox against the real executable:
   embedded page, wrong-password rejection, existing Meteor bcrypt login, and an
-  authorized board stored in SQLite before wekango startup. Credentials remain
+  authorized board, list, swimlane and card reads from SQLite fixtures. Credentials remain
   in memory. Both browsers also verify the actual twelve-step startup dashboard.
   `tests/startup.cjs` restarts the built executable against the same disposable
   SQLite files and verifies persisted gating, skip/force flags and clean shutdown.
   These are preview-page checks, not the full Meteor UI suite.
-- Dependency audit covers all 25 candidate targets: 204-row license union and
+- Dependency audit covers all 25 candidate targets: 256-row license union and
   zero imported-package vulnerability findings. Native reachable-symbol scan
   passes. The unimported, unsupported `x/crypto/openpgp` module advisory is
   documented and imports are explicitly prohibited. Caddy uses a maintained
@@ -161,6 +176,9 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
      a nonzero value is rejected rather than silently ignored; Caddy's private
      internal hop is accounted for by the API throttle.
 3. **One real interactive board slice**
+   - Finish user-board listing's security-event folding and shared API usage
+     accounting; extend informal legacy activity-date parsing beyond tested
+     BSON, numeric, ISO and RFC formats.
    - Port lists/cards/swimlanes, roles and all side effects: create, move, archive,
      activities, rules, notifications, hooks and indexing.
    - Implement authorized DDP/SockJS subscriptions with added/changed/removed,
@@ -171,9 +189,9 @@ download/upload handlers and historical CFS/GridFS conversion remain pending.
 4. **Attachments, import/export and database utilities**
    - Port FilesCollection metadata and existing filesystem routes, range requests,
      quotas, permissions, thumbnails, external object stores and path migrations.
-   - Integrate only required Apache-licensed MongoDB tools packages from
-     mongo-tools-patches through a stable library adapter; no embedded subprocess
-     binary pretending to be an in-process port.
+   - Expand the embedded MongoDB tools integration across external MongoDB,
+     authentication modes, replica sets and every CLI option. Repair the two
+     current embedded monitoring gaps without inventing server metrics.
    - Preserve BSON/JSON/dump/restore formats, indexes/options, backup consistency,
      restoration limits and archive traversal defenses. Test old WeKan backups.
 5. **Whole-product parity**

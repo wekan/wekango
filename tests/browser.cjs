@@ -26,6 +26,24 @@ const base = process.env.WEKANGO_BROWSER_URL || 'http://127.0.0.1:3900';
       assert.match(await page.locator('#description').textContent(), /FerretDB/);
       assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
       await page.screenshot({ path: `${process.env.WEKANGO_SCREENSHOTS || '.'}/${name}-board.png` });
+      const login = await page.request.post(`${base}/users/login`, { data: {username:'browser-user',password:'browser-fixture-password'} });
+      assert.equal(login.status(), 200);
+      const {token} = await login.json();
+      const headers = {Authorization:`Bearer ${token}`};
+      for (const [route, expected] of [
+        ['/api/boards/browser-board/lists','browser-list'],
+        ['/api/boards/browser-board/swimlanes','browser-lane'],
+        ['/api/boards/browser-board/lists/browser-list/cards','browser-card'],
+        ['/api/boards/browser-board/swimlanes/browser-lane/cards','browser-card'],
+      ]) {
+        const response = await page.request.get(base+route, {headers});
+        assert.equal(response.status(),200);
+        assert.ok((await response.json()).some(item=>item._id===expected), route);
+      }
+      const card = await page.request.get(`${base}/api/cards/browser-card`, {headers});
+      assert.equal((await card.json()).title,'Existing SQLite card');
+      const forbidden = await page.request.get(`${base}/api/cards/browser-card`);
+      assert.equal(forbidden.status(),401);
       await page.goto(`${base}/schema-upgrade-status`);
       await page.waitForFunction(() => document.body.textContent.includes('Completed') || document.body.textContent.includes('Already re-checked'));
       assert.match(await page.title(), /WeKan Schema Upgrade/);
@@ -38,7 +56,7 @@ const base = process.env.WEKANGO_BROWSER_URL || 'http://127.0.0.1:3900';
       assert.equal(state.steps['board-allows-defaults'].status, state.gated ? 'skipped' : 'done');
       for (const [step, progress] of Object.entries(state.steps)) assert.notEqual(progress.status, 'error', `${step}: ${progress.error}`);
       await page.screenshot({ path: `${process.env.WEKANGO_SCREENSHOTS || '.'}/${name}-schema-upgrade.png` });
-      console.log(`${name}: existing SQLite board, authentication and twelve-step startup dashboard passed`);
+      console.log(`${name}: existing SQLite board/list/swimlane/card reads, authorization and startup dashboard passed`);
     } finally { await browser.close(); }
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

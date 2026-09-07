@@ -56,7 +56,11 @@ case "${1:-build}" in
       build_target "$name"
     done < "$platforms"
     ;;
-  test) "$GO" test -mod=readonly ./...; bash scripts/release/test-build.sh ;;
+  test)
+    "$GO" test -mod=readonly ./...
+    (cd internal/compat/termbox && "$GO" test -mod=readonly ./...)
+    bash scripts/release/test-build.sh
+    ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

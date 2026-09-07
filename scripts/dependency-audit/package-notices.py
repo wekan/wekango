@@ -18,10 +18,31 @@ while modules_raw.strip():
     modules.append(module)
     modules_raw = modules_raw.lstrip()[end:]
 modules.sort(key=lambda item: len(item['Path']), reverse=True)
+# Owned compatibility modules use historical import paths. go-licenses cannot
+# infer URLs for relative module replacements; point their already-scanned
+# license rows to the actual project source, never the archived upstream repo.
+local_urls = {}
+repo = Path(__file__).resolve().parents[2]
+for module in modules:
+    replacement = module.get('Replace', {})
+    relative = replacement.get('Path', '')
+    if relative in ('./internal/compat/termbox', './internal/compat/yamlv2'):
+        actual = Path(replacement.get('Dir', '')).resolve()
+        expected = (repo / relative).resolve()
+        if actual != expected or not (expected / 'LICENSE').is_file():
+            raise SystemExit(f'Unexpected local license source: {module["Path"]}')
+        local_urls[module['Path']] = 'https://github.com/wekan/wekango/blob/HEAD/' + relative[2:] + '/LICENSE'
 rows = set()
 for report in sorted(output.glob('*/licenses.csv')):
     with report.open(newline='') as stream:
-        rows.update(tuple(row) for row in csv.reader(stream) if row)
+        for row in csv.reader(stream):
+            if not row:
+                continue
+            if row[0] in local_urls:
+                if row[2] != 'MIT':
+                    raise SystemExit(f'Owned compatibility facade license changed: {row}')
+                row[1] = local_urls[row[0]]
+            rows.add(tuple(row))
 if not rows:
     raise SystemExit('No target license inventory: cannot package notices')
 with (output / 'licenses.csv').open('w', newline='') as stream:
@@ -70,7 +91,8 @@ for target in sorted(output.iterdir()):
 if not texts:
     raise SystemExit('No complete license files saved: cannot package notices')
 lines = ['# Third-party notices', '',
-         'Generated from the audited target package closures. WeKan Go source is MIT;',
+         'Generated from the audited target package closures. WeKan-owned source is MIT;',
+         'adapted MongoDB tool entry points retain Apache-2.0;',
          'each third-party component retains its own license below. See `licenses.csv`',
          'for the package inventory, `modules.json` for resolved versions, and',
          '`sources/manifest.json` for the exact MPL-2.0 corresponding-source archives.',

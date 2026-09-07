@@ -60,6 +60,7 @@ jobs:
         run: |
           export TMPDIR="$PWD/.tools/tmp"
           mkdir -p "$TMPDIR"
+          python3 scripts/dependency-audit/test-save-mongo-tools.py
           ./scripts/dependency-audit/check.sh
   browser:
     runs-on: ubuntu-24.04
@@ -101,6 +102,7 @@ jobs:
           export TMPDIR="$PWD/.tools/tmp"
           mkdir -p "$TMPDIR/browser"
           ./build.sh build amd64
+          WEKANGO_BINARY="$PWD/dist/wekan-amd64" python3 tests/database-tools.py
           go run ./tests/browserfixture "$TMPDIR/browser/data/files/db"
           PORT=3900 ROOT_URL=http://127.0.0.1:3900 BIND_IP=127.0.0.1 \
             WRITABLE_PATH="$TMPDIR/browser/data" \

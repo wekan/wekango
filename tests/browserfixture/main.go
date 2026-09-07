@@ -39,6 +39,12 @@ func main() {
 	must(e)
 	_, e = db.Collection("boards").InsertOne(ctx, bson.M{"_id": "browser-board", "title": "Existing SQLite board", "description": "Stored with FerretDB before the application starts.", "members": bson.A{bson.M{"userId": "browser-user", "isActive": true, "isAdmin": true}}})
 	must(e)
+	_, e = db.Collection("swimlanes").InsertOne(ctx, bson.M{"_id": "browser-lane", "boardId": "browser-board", "title": "Default", "sort": 0, "archived": false})
+	must(e)
+	_, e = db.Collection("lists").InsertOne(ctx, bson.M{"_id": "browser-list", "boardId": "browser-board", "title": "Existing list", "sort": 0, "archived": false})
+	must(e)
+	_, e = db.Collection("cards").InsertOne(ctx, bson.M{"_id": "browser-card", "boardId": "browser-board", "listId": "browser-list", "swimlaneId": "browser-lane", "title": "Existing SQLite card", "sort": 0, "archived": false})
+	must(e)
 	fmt.Println("Disposable browser fixture created")
 }
 func must(e error) {

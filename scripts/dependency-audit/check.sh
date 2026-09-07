@@ -30,22 +30,55 @@ while read -r suffix target_os target_arch target_arm; do
     echo "Forbidden unmaintained OpenPGP package (GO-2026-5932)" >&2
     exit 1
   fi
+  # Legacy import paths are compatibility facades owned by this project;
+  # never let tidy or a dependency upgrade silently restore archived backends.
+  for legacy in github.com/nsf/termbox-go gopkg.in/yaml.v2; do
+    if grep -Fxq "$legacy" "$target/packages.txt"; then
+      case "$legacy" in
+        github.com/nsf/termbox-go) expected='./internal/compat/termbox' ;;
+        gopkg.in/yaml.v2) expected='./internal/compat/yamlv2' ;;
+      esac
+      actual=$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{end}}' "$legacy")
+      if [ "$actual" != "$expected" ]; then
+        echo "Legacy backend restored: $legacy must use $expected" >&2
+        exit 1
+      fi
+    fi
+  done
   "$work/govulncheck" -scan=package "$@" > "$target/vulnerabilities-package.txt" 2>&1 || {
     cat "$target/vulnerabilities-package.txt"
     exit 1
   }
-  "$work/go-licenses" check --allowed_licenses="$allowed" "$@"
-  "$work/go-licenses" report "$@" > "$target/licenses.csv"
+  # mongo-tools has a short Apache notice that the classifier cannot identify.
+  # Validate the exact reviewed module and notices BEFORE enabling this one
+  # package-prefix exception; dependencies remain subject to normal scanning.
+  mongo_ignore=''
+  mongo_option=''
+  if grep -q '^github.com/mongodb/mongo-tools/' "$target/packages.txt"; then
+    go list -m -json github.com/mongodb/mongo-tools > "$work/mongo-tools-module.json"
+    go list -deps -f '{{if .Module}}{{.ImportPath}}|{{.Module.Path}}|{{.Module.Version}}|{{if .Module.Replace}}replaced{{end}}{{end}}' "$@" > "$work/package-owners.txt"
+    python3 scripts/dependency-audit/save-mongo-tools.py "$work/mongo-tools-module.json" "$target/packages.txt" "$work/package-owners.txt" "$work/reviewed-notices-$suffix" "$work/mongo-tools-$suffix.csv"
+    mongo_ignore='github.com/mongodb/mongo-tools/'
+    mongo_option="--ignore=$mongo_ignore"
+  fi
+  "$work/go-licenses" check ${mongo_option:+"$mongo_option"} --allowed_licenses="$allowed" "$@"
+  "$work/go-licenses" report ${mongo_option:+"$mongo_option"} "$@" > "$target/licenses.csv"
+  if [ -n "$mongo_ignore" ]; then
+    cat "$work/mongo-tools-$suffix.csv" >> "$target/licenses.csv"
+  fi
   # The classifier recognizes Lucent text but assigns unknown restriction type,
   # so save cannot process it. Check/report above still validate it; preserve
   # that one reviewed license separately, requiring its exact reviewed digest.
-  "$work/go-licenses" save --ignore=github.com/dop251/goja/ftoa "$@" --save_path="$work/notices-$suffix"
+  "$work/go-licenses" save --ignore="github.com/dop251/goja/ftoa${mongo_ignore:+,$mongo_ignore}" "$@" --save_path="$work/notices-$suffix"
   if grep -q '^github.com/dop251/goja/ftoa$' "$target/packages.txt"; then
     goja_dir=$(go list -f '{{.Dir}}' github.com/dop251/goja/ftoa)
     python3 scripts/dependency-audit/save-lucent.py "$goja_dir/LICENSE_LUCENE" "$work/notices-$suffix/github.com/dop251/goja/ftoa/LICENSE_LUCENE"
   fi
   mkdir -p "$target/notices"
   cp -R "$work/notices-$suffix/." "$target/notices/"
+  if [ -n "$mongo_ignore" ]; then
+    cp -R "$work/reviewed-notices-$suffix/." "$target/notices/"
+  fi
 done < "$work/platforms"
 mkdir -p "$AUDIT_OUTPUT/toolchain/notices/Go"
 cp "$(go env GOROOT)/LICENSE" "$AUDIT_OUTPUT/toolchain/notices/Go/LICENSE"

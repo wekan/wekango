@@ -59,6 +59,24 @@ class NoticesTest(unittest.TestCase):
         self.assertIn('Lucent notice changed', result.stderr)
         self.assertFalse(saved.exists())
 
+    def test_owned_facade_uses_project_source_url(self):
+        repo = SCRIPT.resolve().parents[2]
+        module = {'Path':'gopkg.in/yaml.v2','Version':'v2.4.0',
+                  'Replace':{'Path':'./internal/compat/yamlv2','Dir':str(repo/'internal/compat/yamlv2')}}
+        with (self.root/'modules.json').open('a') as stream:
+            stream.write('\n'+json.dumps(module))
+        with (self.root/'native/licenses.csv').open('a') as stream:
+            stream.write('gopkg.in/yaml.v2,Unknown,MIT\n')
+        result = self.run_packager()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('github.com/wekan/wekango/blob/HEAD/internal/compat/yamlv2/LICENSE,MIT',
+                      (self.root/'licenses.csv').read_text())
+        module['Replace']['Dir'] = str(self.root)
+        (self.root/'modules.json').write_text(json.dumps(module))
+        result = self.run_packager()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Unexpected local license source', result.stderr)
+
     def test_missing_inventory_fails_closed(self):
         (self.root / 'native/licenses.csv').unlink()
         result = self.run_packager()

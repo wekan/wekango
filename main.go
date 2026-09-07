@@ -30,6 +30,9 @@ import (
 )
 
 func main() {
+	if name, args, ok := databaseToolCommand(os.Args); ok {
+		os.Exit(runDatabaseTool(name, args))
+	}
 	if err := run(); err != nil {
 		slog.Error("WeKan could not run", "error", err)
 		os.Exit(1)
@@ -45,7 +48,7 @@ func run() error {
 			fmt.Print(string(compatibility.Manifest))
 			return nil
 		case "--help", "-h":
-			fmt.Println("wekan [--version | --compatibility | --check-config | --migrate-checklist-minicard]\nConfiguration uses WeKan environment variables; see ROADMAP.md for current coverage.")
+			fmt.Println("wekan [--version | --compatibility | --check-config | --migrate-checklist-minicard]\nAlso: wekan {bsondump|mongodump|mongorestore|mongoexport|mongoimport|mongofiles|mongostat|mongotop} [options]\nConfiguration uses WeKan environment variables; see ROADMAP.md for current coverage.")
 			return nil
 		case "--check-config", "--migrate-checklist-minicard":
 		default:

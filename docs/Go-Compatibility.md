@@ -43,6 +43,39 @@ The embedded preview page supports local-password sign-in and authorized board
 reads. It is not the complete Meteor browser bundle. Missing functionality is
 listed in the roadmap; absent APIs do not silently accept writes.
 
+## Embedded database tools
+
+The same executable provides `bsondump`, `mongodump`, `mongorestore`,
+`mongoexport`, `mongoimport`, `mongofiles`, `mongostat` and `mongotop`:
+
+```sh
+./wekan-arm64 mongodump --db=wekan --archive=backup.archive
+./wekan-arm64 mongorestore --archive=backup.archive
+./wekan-arm64 mongoexport --db=wekan --collection=boards --out=boards.json
+./wekan-arm64 bsondump --bsonFile=boards.bson
+```
+
+These are the upstream MongoDB tools called within the Go process, with their
+usual arguments and BSON/archive/Extended JSON formats. They run before Caddy
+and application writers start. `--help` and `--version` require no database.
+A symlink named `mongodump` (or another tool name) selects that command directly.
+
+Without an explicit connection argument, database tools use `MONGO_URL` when set,
+or open the existing configured FerretDB SQLite directory in the same process.
+Stop the application before opening those SQLite files with a tool command.
+Tools retain upstream database/collection selection flags; use `--db=wekan`
+when the operation should select only that database. An explicit `--uri`,
+`--host`, `-h`, `--port` or `--config` retains upstream connection behavior.
+`bsondump` always processes files/streams without starting storage.
+
+BSON dump/restore, canonical JSON export/import and GridFS put/get/delete have
+passed against embedded FerretDB. Two monitoring operations currently fail
+against the pinned FerretDB: `mongostat` cannot decode its fractional `uptime`,
+and `mongotop` requires the unimplemented `top` command. Their upstream CLI
+implementations are embedded, but these backend gaps remain in ROADMAP.md.
+External MongoDB authentication, cluster monitoring and every tool option still
+need their broader integration matrix.
+
 ## Startup schema upgrades
 
 The twelve current steps from `server/lib/schemaUpgradeSteps.js` run in the
