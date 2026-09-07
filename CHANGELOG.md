@@ -2,6 +2,22 @@
 
 # Upcoming WeKan ® release
 
+- [Preserve re-enabled accounts and concurrent database updates](https://github.com/wekan/wekango/commit/35a37aa).
+  Thanks to xet7.
+  Accept re-enabled local accounts while preserving historical refusal metadata,
+  password hashes and unrelated fields. Follow the source login hook's disabled
+  flag truthiness, recreate absent token arrays atomically, and retain rejection
+  of malformed token fields and unsupported authentication. Concurrent-login
+  regressions exposed FerretDB's stale whole-document replacements; include the
+  maintained fork's shared mutation gate so acknowledged tokens are not lost.
+  The runtime copy records exact commit/file provenance and preserves Apache-2.0
+  LICENSE/NOTICE. Builds verify the copy; source updates remain reproducible from
+  local fork commits without publishing. Restore the documented rebuild wrapper.
+  Full Go/build tests, 27 source comparisons, race tests, twenty repeated
+  concurrent-logins, native SQLite report/export and Chromium/Firefox checks
+  pass. The native dependency audit passes; cross-platform revalidation and
+  including queue wait in maxTimeMS remain recorded roadmap work.
+
 - [Preserve self and admin user REST reads with credential redaction](https://github.com/wekan/wekango/commit/94a0623).
   Thanks to xet7.
   Add the self-profile, admin user-list and admin detail endpoints with the
