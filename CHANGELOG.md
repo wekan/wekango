@@ -2,6 +2,21 @@
 
 # Upcoming WeKan ® release
 
+- [Embed database tools and extend board resource reads](https://github.com/wekan/wekango/commit/b6bc8ee).
+  Thanks to xet7.
+  All eight MongoDB tools run inside the same executable, retaining upstream
+  arguments and formats. Default operations open configured external storage
+  or existing FerretDB SQLite paths before application writers start. Add ten
+  board/list/swimlane/card read routes with source-specific authorization,
+  projections, archive filters and response shapes. Update Azure authentication
+  dependencies and use maintained tcell/YAML backends through owned compatibility
+  facades. Preserve Apache source notices and verify the complete license graph.
+  BSON/archive/Extended JSON/GridFS round trips, terminal tests, Go/race suites,
+  Chromium/Firefox authorization and executable restart tests pass. All 25
+  binaries cross-compile and verify checksums; dependency scans report no
+  imported-package vulnerabilities. FerretDB monitoring command gaps, remaining
+  security-event middleware and full product parity remain documented in ROADMAP.
+
 - [Port the twelve current schema upgrades and live progress dashboard](https://github.com/wekan/wekango/commit/416962d).
   Thanks to xet7.
   Run the current WeKan schema pipeline in the background, preserving its
