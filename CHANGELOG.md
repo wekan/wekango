@@ -2,6 +2,17 @@
 
 # Upcoming WeKan ® release
 
+- [Preserve API usage reports in existing event summaries](https://github.com/wekan/wekango/commit/bd49757).
+  Thanks to xet7.
+  Batch API requests by account and route pattern and write the existing
+  eventlog summary format, preserving IDs, first-seen values, actor hashes and
+  bounded overflow. Resolve public client addresses and display-only geography;
+  flush pending reports before closing SQLite. Actual-source comparisons,
+  concurrent database/race tests, native shutdown/export and Chromium/Firefox
+  checks pass. The source writer's per-flush counter discrepancy is preserved
+  and documented explicitly; exact call totals, security/account-blocking side
+  effects, report UI and full application parity remain roadmap work.
+
 - [Fix incomplete migration fixture JavaScript syntax](https://github.com/wekan/wekango/commit/db90485).
   Thanks to xet7.
   The checklist-minicard snapshot was an incomplete object fragment, causing
