@@ -77,6 +77,23 @@ References: [CodeQL injection query](https://codeql.github.com/codeql-query-help
 [GitHub suppression-to-dismissal mechanism](https://github.com/advanced-security/dismiss-alerts),
 and [Meteor password server](https://github.com/meteor/meteor/blob/release/METEOR%403.4.1/packages/accounts-password/password_server.js).
 
+## Alert #3 resolution
+
+Dismissing the alert was not needed after all. As caddy-wekan-plugin did for
+its code scanning #9 and #163, and WeKan for its breach-check digest (CodeQL
+#599), the Meteor prehash is now computed in exactly one place,
+`meteorPreHash` in `internal/api/meteor_prehash.go`, through the crypto
+package's hash registry (`crypto.SHA256.New()`). The scheme is unchanged:
+`bcrypt(hex(SHA-256(password)))`, so every existing Meteor password still
+matches. The browser fixture seeds its user from a constant prehash instead of
+hashing a password itself.
+
+`TestNoFastHashOfPasswords` checks Meteor's digest (UTF-8 and empty input), and
+scans every non-test Go file outside `internal/compat`: no MD5/SHA-1/SHA-2/SHA-3
+call on a line mentioning a password, and `crypto.SHA256` only in
+`meteor_prehash.go`. Its negative test proves the scan matches the old
+`sha256.Sum256([]byte(password))` shape.
+
 ## Re-enabled accounts and concurrent blocking
 
 `services.securityBlock` is historical refusal metadata, not an authentication

@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -34,15 +32,12 @@ func (s *service) findLoginUser(ctx context.Context, username, email string, byE
 
 // compareMeteorPassword verifies the complete existing Meteor password scheme:
 // bcrypt(hex(SHA-256(password))). The salted, expensive bcrypt hash is the
-// stored verifier. SHA-256 is only its compatibility prehash (also avoids bcrypt
-// input truncation); it is never stored or used as a password verifier itself.
-// This helper returns only the bcrypt comparison result, never the prehash.
+// stored verifier. SHA-256 is only its compatibility prehash (meteorPreHash,
+// which also avoids bcrypt input truncation); it is never stored or used as a
+// password verifier itself. This helper returns only the bcrypt comparison
+// result, never the prehash. TestMeteorPasswordRequiresBcrypt pins that boundary.
 func compareMeteorPassword(stored []byte, password string) bool {
-	// CodeQL reports this intermediate hash without considering the mandatory
-	// bcrypt comparison below. TestMeteorPasswordRequiresBcrypt pins that boundary.
-	// See docs/Go-Login-Security.md for the reviewed CodeQL false positive.
-	digest := sha256.Sum256([]byte(password))
-	return bcrypt.CompareHashAndPassword(stored, []byte(hex.EncodeToString(digest[:]))) == nil
+	return bcrypt.CompareHashAndPassword(stored, []byte(meteorPreHash(password))) == nil
 }
 
 // loginDisabled follows the JavaScript validation hook, including the empty

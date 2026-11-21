@@ -5,7 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -108,5 +113,73 @@ func TestLoginSelectorsRejectOperators(t *testing.T) {
 		if response.Code != 200 {
 			t.Fatalf("literal name rejected: %d %s", response.Code, response.Body.String())
 		}
+	}
+}
+
+// Code scanning alert #3: Meteor's prehash is computed in one place, through
+// the crypto package's registry, and no other fast hash in this repository's
+// own Go code touches a password - as caddy-wekan-plugin pins for its #9 and
+// #163 and WeKan for its breach-check digest (#599).
+func TestNoFastHashOfPasswords(t *testing.T) {
+	want := sha256.Sum256([]byte("pässwörd"))
+	if meteorPreHash("pässwörd") != hex.EncodeToString(want[:]) {
+		t.Fatal("meteorPreHash is Meteor's SHA-256 hex digest, UTF-8 too")
+	}
+	if meteorPreHash("") != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Fatal("meteorPreHash of the empty password")
+	}
+	fast := regexp.MustCompile(`\b(?:md5|sha1|sha256|sha512|sha3)\.(?:Sum\w*|New\w*)\(|crypto\.(?:MD5|SHA1|SHA256|SHA512)\.New\(`)
+	pass := regexp.MustCompile(`(?i)pass`)
+	// The negative test: the scan sees the shape alert #3 reported.
+	if !fast.MatchString(`digest := sha256.Sum256([]byte(password))`) || !pass.MatchString(`digest := sha256.Sum256([]byte(password))`) {
+		t.Fatal("the scan misses the old shape")
+	}
+	root := filepath.Join("..", "..")
+	var offenders []string
+	scanned := 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		if d.IsDir() {
+			// internal/compat holds vendored third-party modules (FerretDB and
+			// others), not WeKan's login code.
+			if rel == filepath.Join("internal", "compat") || strings.HasPrefix(d.Name(), ".") && rel != "." || d.Name() == "vendor" || d.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		scanned++
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(src)
+		isPrehash := rel == filepath.Join("internal", "api", "meteor_prehash.go")
+		if !isPrehash && strings.Contains(text, "crypto.SHA256") {
+			offenders = append(offenders, rel+": crypto.SHA256 outside meteor_prehash.go")
+		}
+		for i, line := range strings.Split(text, "\n") {
+			if !isPrehash && fast.MatchString(line) && pass.MatchString(line) {
+				offenders = append(offenders, fmt.Sprintf("%s:%d %s", rel, i+1, strings.TrimSpace(line)))
+			}
+		}
+		if isPrehash && (strings.Contains(text, "sha256.Sum") || !strings.Contains(text, "crypto.SHA256.New()")) {
+			offenders = append(offenders, rel+": the prehash is computed through the crypto package's registry only")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanned < 10 {
+		t.Fatalf("scanned only %d Go files", scanned)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("a fast hash next to a password:\n%s", strings.Join(offenders, "\n"))
 	}
 }

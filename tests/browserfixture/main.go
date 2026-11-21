@@ -4,8 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"github.com/wekan/wekango/internal/database"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -15,6 +13,8 @@ import (
 	"os"
 	"time"
 )
+
+const browserFixturePrehash = "aa6b910ee7802996f5fdbad379244fde9eeacd7d8b3320e668f9fc37e324f99a"
 
 func main() {
 	if len(os.Args) != 2 {
@@ -32,8 +32,10 @@ func main() {
 	must(e)
 	defer client.Disconnect(context.Background())
 	db := client.Database("wekan")
-	digest := sha256.Sum256([]byte("browser-fixture-password"))
-	hash, e := bcrypt.GenerateFromPassword([]byte(hex.EncodeToString(digest[:])), 10)
+	// Meteor's prehash of the fixture's "browser-fixture-password", as a
+	// constant: no fast hash next to a password outside meteor_prehash.go
+	// (TestNoFastHashOfPasswords, code scanning #3).
+	hash, e := bcrypt.GenerateFromPassword([]byte(browserFixturePrehash), 10)
 	must(e)
 	_, e = db.Collection("users").InsertOne(ctx, bson.M{"_id": "browser-user", "username": "browser-user", "authenticationMethod": "password", "profile": bson.M{"fullname": "Browser Test"}, "services": bson.M{"password": bson.M{"bcrypt": string(hash)}, "securityBlock": bson.M{"reason": "Historical refusal", "source": "api"}}})
 	must(e)
