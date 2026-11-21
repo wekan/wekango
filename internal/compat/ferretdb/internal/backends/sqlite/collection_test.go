@@ -31,6 +31,45 @@ import (
 	"github.com/FerretDB/FerretDB/internal/util/testutil"
 )
 
+func TestCollectionDiscoveryErrors(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Ctx(t)
+	sp, err := state.NewProvider("")
+	require.NoError(t, err)
+	r, err := metadata.NewRegistry(testutil.TestSQLiteURI(t, ""), 100, testutil.Logger(t), sp)
+	require.NoError(t, err)
+	t.Cleanup(r.Close)
+	dbName := testutil.DatabaseName(t)
+	db, err := r.DatabaseGetOrCreate(ctx, dbName)
+	require.NoError(t, err)
+	c := newCollection(r, dbName, "external")
+	result, err := c.CountAll(ctx, &backends.CountAllParams{})
+	require.NoError(t, err)
+	require.Zero(t, result.Count)
+
+	_, err = db.ExecContext(ctx, "CREATE TABLE external_table (_ferretdb_sjson BLOB NOT NULL) STRICT")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "INSERT INTO _ferretdb_collections (name, table_name, settings) VALUES (?, ?, ?)",
+		"external", "external_table", "{invalid")
+	require.NoError(t, err)
+
+	_, err = c.Query(ctx, &backends.QueryParams{})
+	require.Error(t, err)
+	_, err = c.CountAll(ctx, &backends.CountAllParams{})
+	require.Error(t, err)
+	_, err = c.InsertAll(ctx, &backends.InsertAllParams{})
+	require.Error(t, err)
+	dropped, err := r.CollectionDrop(ctx, dbName, "external")
+	require.Error(t, err)
+	require.False(t, dropped)
+
+	_, err = db.ExecContext(ctx, "UPDATE _ferretdb_collections SET settings = ? WHERE name = ?", `{"storage":"jsonb"}`, "external")
+	require.NoError(t, err)
+	result, err = c.CountAll(ctx, &backends.CountAllParams{})
+	require.NoError(t, err)
+	require.Zero(t, result.Count)
+}
+
 func TestCappedCollectionInsertAllQueryExplain(t *testing.T) {
 	// remove this test
 	// TODO https://github.com/FerretDB/FerretDB/issues/3181
@@ -81,6 +120,18 @@ func TestCappedCollectionInsertAllQueryExplain(t *testing.T) {
 		for i, doc := range docs {
 			assert.Equal(t, insertDocs[i].RecordID(), doc.RecordID())
 			assert.NotZero(t, doc.RecordID())
+		}
+
+		for _, filter := range []*types.Document{nil, must.NotFail(types.NewDocument("_id", must.NotFail(insertDocs[2].Get("_id"))))} {
+			res, err := cappedColl.Query(ctx, &backends.QueryParams{Sort: sort, Filter: filter, StartRecordID: docs[1].RecordID()})
+			require.NoError(t, err)
+			remaining, err := iterator.ConsumeValues(res.Iter)
+			require.NoError(t, err)
+			if filter == nil {
+				testutil.AssertEqualSlices(t, insertDocs[1:], remaining)
+			} else {
+				testutil.AssertEqualSlices(t, insertDocs[2:], remaining)
+			}
 		}
 
 		explainRes, err := cappedColl.Explain(ctx, &backends.ExplainParams{Sort: sort})
@@ -190,8 +241,9 @@ func TestQueryNumericTypeNorRangePushdown(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"nan", "string", "array"}, ids,
 		"non-finite numbers and safe string/array supersets remain; finite scalars and missing fields are pruned")
-	indexName, _ := preferredNumericRangeIndex(r.CollectionGet(ctx, dbName, collectionName).TableName,
-		r.CollectionGet(ctx, dbName, collectionName).Settings.Indexes, filter)
+	collectionMetadata, err := r.CollectionGet(ctx, dbName, collectionName)
+	require.NoError(t, err)
+	indexName, _ := preferredNumericRangeIndex(collectionMetadata.TableName, collectionMetadata.Settings.Indexes, filter)
 	var physicalIndex string
 	require.NoError(t, sqlDB.QueryRowContext(ctx,
 		"SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", indexName).Scan(&physicalIndex))
@@ -351,6 +403,60 @@ func TestQueryOrWithDottedArrayPaths(t *testing.T) {
 	assert.False(t, explainRes.FilterPushdown)
 }
 
+// TestQueryDottedPathThroughArray verifies that a pushed-down dotted path is a
+// superset of MongoDB's match: a document whose path runs through an array of
+// documents is still a candidate, and one with a different value is not.
+func TestQueryDottedPathThroughArray(t *testing.T) {
+	t.Parallel()
+
+	ctx := testutil.Ctx(t)
+	sp, err := state.NewProvider("")
+	require.NoError(t, err)
+	b, err := NewBackend(&NewBackendParams{
+		URI: testutil.TestSQLiteURI(t, ""), L: testutil.Logger(t), P: sp, BatchSize: 100,
+	})
+	require.NoError(t, err)
+	t.Cleanup(b.Close)
+	db, err := b.Database(testutil.DatabaseName(t))
+	require.NoError(t, err)
+	coll, err := db.Collection(testutil.CollectionName(t))
+	require.NoError(t, err)
+
+	_, err = coll.InsertAll(ctx, &backends.InsertAllParams{Docs: []*types.Document{
+		must.NotFail(types.NewDocument("_id", "object", "meta", must.NotFail(types.NewDocument("cardId", "C")))),
+		must.NotFail(types.NewDocument("_id", "array", "meta", must.NotFail(types.NewArray(
+			must.NotFail(types.NewDocument("cardId", "C")),
+		)))),
+		must.NotFail(types.NewDocument("_id", "other", "meta", must.NotFail(types.NewDocument("cardId", "D")))),
+	}})
+	require.NoError(t, err)
+
+	for name, filter := range map[string]*types.Document{
+		"Equality": must.NotFail(types.NewDocument("meta.cardId", "C")),
+		"In": must.NotFail(types.NewDocument("meta.cardId",
+			must.NotFail(types.NewDocument("$in", must.NotFail(types.NewArray("C", "X")))))),
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := coll.Query(ctx, &backends.QueryParams{Filter: filter})
+			require.NoError(t, err)
+			docs, err := iterator.ConsumeValues[struct{}, *types.Document](res.Iter)
+			require.NoError(t, err)
+
+			var ids []string
+			for _, doc := range docs {
+				ids = append(ids, must.NotFail(doc.Get("_id")).(string))
+			}
+
+			assert.ElementsMatch(t, []string{"object", "array"}, ids,
+				"the array row must stay a candidate and the other value must not")
+
+			explainRes, err := coll.Explain(ctx, &backends.ExplainParams{Filter: filter})
+			require.NoError(t, err)
+			assert.True(t, explainRes.FilterPushdown)
+		})
+	}
+}
+
 // TestQueryElemMatchPushdown verifies that all pushed predicates are applied to
 // one array element. A document with the requested values split across two
 // elements must not pass the SQLite WHERE clause.
@@ -505,4 +611,47 @@ func TestQueryRangePushdownDates(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, explainRes.FilterPushdown, "the date range must be pushed down")
 	})
+}
+
+func TestCountAll(t *testing.T) {
+	t.Parallel()
+
+	ctx := testutil.Ctx(t)
+
+	sp, err := state.NewProvider("")
+	require.NoError(t, err)
+
+	b, err := NewBackend(&NewBackendParams{URI: testutil.TestSQLiteURI(t, ""), L: testutil.Logger(t), P: sp, BatchSize: 100})
+	require.NoError(t, err)
+	t.Cleanup(b.Close)
+
+	db, err := b.Database(testutil.DatabaseName(t))
+	require.NoError(t, err)
+
+	coll, err := db.Collection(testutil.CollectionName(t))
+	require.NoError(t, err)
+
+	// Negative: a collection (and database) that does not exist has none.
+	res, err := coll.CountAll(ctx, new(backends.CountAllParams))
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), res.Count)
+
+	docs := make([]*types.Document, 1234)
+	for i := range docs {
+		docs[i] = must.NotFail(types.NewDocument("_id", int32(i), "v", "x"))
+	}
+
+	_, err = coll.InsertAll(ctx, &backends.InsertAllParams{Docs: docs})
+	require.NoError(t, err)
+
+	res, err = coll.CountAll(ctx, new(backends.CountAllParams))
+	require.NoError(t, err)
+	assert.Equal(t, int64(1234), res.Count, "exact, not an estimate")
+
+	_, err = coll.DeleteAll(ctx, &backends.DeleteAllParams{IDs: []any{int32(0), int32(1)}})
+	require.NoError(t, err)
+
+	res, err = coll.CountAll(ctx, new(backends.CountAllParams))
+	require.NoError(t, err)
+	assert.Equal(t, int64(1232), res.Count, "and current after a delete")
 }

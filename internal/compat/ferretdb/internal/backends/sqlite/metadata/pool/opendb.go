@@ -17,17 +17,80 @@ package pool
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"runtime"
 
-	_ "modernc.org/sqlite" // register database/sql driver
+	"modernc.org/sqlite"
+	sqlite3lib "modernc.org/sqlite/lib"
 
 	"github.com/FerretDB/FerretDB/internal/util/fsql"
 	"github.com/FerretDB/FerretDB/internal/util/lazyerrors"
 	"github.com/FerretDB/FerretDB/internal/util/logging"
+	"github.com/FerretDB/FerretDB/internal/util/sqlguard"
 	"github.com/FerretDB/FerretDB/internal/util/state"
 )
+
+var openShortSQLite func(string) (*sql.DB, error)
+var isShortUniqueConstraint func(error) bool
+
+func openSQLite(uri string, shortNames bool) (*sql.DB, error) {
+	if shortNames && openShortSQLite != nil {
+		return openShortSQLite(uri)
+	}
+	return sql.Open("sqlite", uri)
+}
+
+// IsUniqueConstraint recognizes the extended SQLite error from either driver.
+func IsUniqueConstraint(err error) bool {
+	var sqliteError *sqlite.Error
+	if errors.As(err, &sqliteError) && sqliteError.Code() == sqlite3lib.SQLITE_CONSTRAINT_UNIQUE {
+		return true
+	}
+	return isShortUniqueConstraint != nil && isShortUniqueConstraint(err)
+}
+
+// checkShortSidecarBuild checks the library before opening any disk files.
+func checkShortSidecarBuild(requested bool) error {
+	db, err := openSQLite("file::memory:", requested)
+	if err != nil {
+		return lazyerrors.Error(err)
+	}
+	defer db.Close()
+	rows, err := db.Query("PRAGMA compile_options")
+	if err != nil {
+		return lazyerrors.Error(err)
+	}
+	defer rows.Close()
+	forced, dbstat := false, false
+	for rows.Next() {
+		var option string
+		if err := rows.Scan(&option); err != nil {
+			return lazyerrors.Error(err)
+		}
+		switch option {
+		case "ENABLE_8_3_NAMES=2":
+			forced = true
+		case "ENABLE_DBSTAT_VTAB":
+			dbstat = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return lazyerrors.Error(err)
+	}
+	if requested && !forced {
+		return fmt.Errorf("shortnames=1 requires SQLite built with SQLITE_ENABLE_8_3_NAMES=2")
+	}
+	if requested && !dbstat {
+		return fmt.Errorf("shortnames=1 requires SQLite built with SQLITE_ENABLE_DBSTAT_VTAB")
+	}
+	if forced && !requested {
+		return fmt.Errorf("SQLite forces short sidecars; set dbext=db and shortnames=1")
+	}
+	return nil
+}
 
 // openDB opens existing database or creates a new one.
 //
@@ -35,8 +98,8 @@ import (
 // so no validation is needed.
 // One exception is very long full path names for the filesystem,
 // but we don't check it.
-func openDB(name, uri string, memory bool, l *slog.Logger, sp *state.Provider) (*fsql.DB, error) {
-	db, err := sql.Open("sqlite", uri)
+func openDB(name, uri string, memory, repair, shortNames bool, l *slog.Logger, sp *state.Provider) (*fsql.DB, error) {
+	db, err := openSQLite(uri, shortNames)
 	if err != nil {
 		return nil, lazyerrors.Error(err)
 	}
@@ -48,7 +111,9 @@ func openDB(name, uri string, memory bool, l *slog.Logger, sp *state.Provider) (
 		return nil, lazyerrors.Error(err)
 	}
 
-	checkAndRepairSQLite(db, name, memory, l)
+	if repair {
+		checkAndRepairSQLite(db, name, memory, l)
+	}
 
 	// do it only once because version can't change
 	if sp.Get().BackendVersion == "" {
@@ -65,7 +130,7 @@ func openDB(name, uri string, memory bool, l *slog.Logger, sp *state.Provider) (
 		}
 	}
 
-	return fsql.WrapDB(db, name, l), nil
+	return fsql.WrapDBDialect(db, name, l, sqlguard.SQLite), nil
 }
 
 // sqliteAutoRepairEnabled reports whether automatic SQLite corruption detection and

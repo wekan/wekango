@@ -17,6 +17,7 @@ package postgresql
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,7 +99,10 @@ func TestPrepareWhereClause(t *testing.T) {
 	objectID := types.ObjectID{0x62, 0x56, 0xc5, 0xba, 0x0b, 0xad, 0xc0, 0xff, 0xee, 0xff, 0xff, 0xff}
 
 	// WHERE clauses occurring frequently in tests
-	whereContain := " WHERE _jsonb->$1 @> $2"
+	// A top-level equality names its field as a literal, as the index does
+	// (filterEqualIndexed), so PostgreSQL can answer it from that index.
+	whereEqID := " WHERE _jsonb->'_id' = $1"
+	whereEqV := ` WHERE (_jsonb->'v' = $1 OR (_jsonb->'v' >= '[null]'::jsonb AND _jsonb->'v' < '{}'::jsonb AND _jsonb->'v' @> $1))`
 	whereContainDotNotation := " WHERE _jsonb#>$1 @> $2"
 
 	whereGt := " WHERE _jsonb->$1 > $2"
@@ -112,15 +116,15 @@ func TestPrepareWhereClause(t *testing.T) {
 	}{
 		"IDObjectID": {
 			filter:   must.NotFail(types.NewDocument("_id", objectID)),
-			expected: whereContain,
+			expected: whereEqID,
 		},
 		"IDString": {
 			filter:   must.NotFail(types.NewDocument("_id", "foo")),
-			expected: whereContain,
+			expected: whereEqID,
 		},
 		"IDBool": {
 			filter:   must.NotFail(types.NewDocument("_id", "foo")),
-			expected: whereContain,
+			expected: whereEqID,
 		},
 		"IDDotNotation": {
 			filter:   must.NotFail(types.NewDocument("_id.doc", "foo")),
@@ -142,8 +146,18 @@ func TestPrepareWhereClause(t *testing.T) {
 			// {ts: {$gt: <Timestamp>}} — the OpLog tail shape.
 			filter: must.NotFail(types.NewDocument("ts",
 				must.NotFail(types.NewDocument("$gt", types.Timestamp(7300000000000000000))))),
-			expected: ` WHERE jsonb_typeof(_jsonb->$1) = 'number' AND (_jsonb->>$2)::numeric > $3`,
-			args:     []any{"ts", "ts", int64(7300000000000000000)},
+			// The key is a LITERAL, matching the capped-collection index expression
+			// ((_jsonb->>'ts')::numeric); a parameter key makes generic plans scan.
+			expected: ` WHERE jsonb_typeof(_jsonb->'ts') = 'number' AND (_jsonb->>'ts')::numeric > $1`,
+			args:     []any{int64(7300000000000000000)},
+		},
+		"RangeNestedTsKeepsParameters": {
+			// Only the top-level ts field is indexed; a nested one keeps the path
+			// as a parameter.
+			filter: must.NotFail(types.NewDocument("a.ts",
+				must.NotFail(types.NewDocument("$gt", int64(5))))),
+			expected: ` WHERE jsonb_typeof(_jsonb#>$1) = 'number' AND (_jsonb#>>$2)::numeric > $3`,
+			args:     []any{[]string{"a", "ts"}, []string{"a", "ts"}, int64(5)},
 		},
 		"RangeNumberLte": {
 			filter: must.NotFail(types.NewDocument("count",
@@ -162,14 +176,14 @@ func TestPrepareWhereClause(t *testing.T) {
 		"InPushed": {
 			filter: must.NotFail(types.NewDocument("labelIds",
 				must.NotFail(types.NewDocument("$in", must.NotFail(types.NewArray("a", "b")))))),
-			expected: ` WHERE (_jsonb->$1 @> $2 OR _jsonb->$3 @> $4)`,
-			args:     []any{"labelIds", `"a"`, "labelIds", `"b"`},
+			expected: ` WHERE (_jsonb->'labelIds' IN ($1, $2) OR (_jsonb->'labelIds' >= '[null]'::jsonb AND _jsonb->'labelIds' < '{}'::jsonb AND (_jsonb->'labelIds' @> $1 OR _jsonb->'labelIds' @> $2)))`,
+			args:     []any{`"a"`, `"b"`},
 		},
 		"InWithNullPushed": {
 			filter: must.NotFail(types.NewDocument("boardId",
 				must.NotFail(types.NewDocument("$in", must.NotFail(types.NewArray("B", types.Null)))))),
-			expected: ` WHERE (_jsonb->$1 @> $2 OR (_jsonb->$3 IS NULL OR _jsonb->$4 = 'null'::jsonb))`,
-			args:     []any{"boardId", `"B"`, "boardId", "boardId"},
+			expected: ` WHERE (_jsonb->'boardId' IN ($1) OR (_jsonb->'boardId' >= '[null]'::jsonb AND _jsonb->'boardId' < '{}'::jsonb AND (_jsonb->'boardId' @> $1)) OR (_jsonb->'boardId' IS NULL OR _jsonb->'boardId' = 'null'::jsonb))`,
+			args:     []any{`"B"`},
 		},
 		"InNestedElementNotPushed": {
 			// a nested-array element has no safe arm -> the whole $in stays in Go.
@@ -181,23 +195,23 @@ func TestPrepareWhereClause(t *testing.T) {
 
 		"ImplicitString": {
 			filter:   must.NotFail(types.NewDocument("v", "foo")),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"ImplicitEmptyString": {
 			filter:   must.NotFail(types.NewDocument("v", "")),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"ImplicitInt32": {
 			filter:   must.NotFail(types.NewDocument("v", int32(42))),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"ImplicitInt64": {
 			filter:   must.NotFail(types.NewDocument("v", int64(42))),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"ImplicitFloat64": {
 			filter:   must.NotFail(types.NewDocument("v", float64(42.13))),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"ImplicitMaxFloat64": {
 			filter:   must.NotFail(types.NewDocument("v", math.MaxFloat64)),
@@ -205,49 +219,49 @@ func TestPrepareWhereClause(t *testing.T) {
 		},
 		"ImplicitBool": {
 			filter:   must.NotFail(types.NewDocument("v", true)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"ImplicitDatetime": {
 			filter: must.NotFail(types.NewDocument(
 				"v", time.Date(2021, 11, 1, 10, 18, 42, 123000000, time.UTC),
 			)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"ImplicitObjectID": {
 			filter:   must.NotFail(types.NewDocument("v", objectID)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 
 		"EqString": {
 			filter: must.NotFail(types.NewDocument(
 				"v", must.NotFail(types.NewDocument("$eq", "foo")),
 			)),
-			args:     []any{`v`, `"foo"`},
-			expected: whereContain,
+			args:     []any{`"foo"`},
+			expected: whereEqV,
 		},
 		"EqEmptyString": {
 			filter: must.NotFail(types.NewDocument(
 				"v", must.NotFail(types.NewDocument("$eq", "")),
 			)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"EqInt32": {
 			filter: must.NotFail(types.NewDocument(
 				"v", must.NotFail(types.NewDocument("$eq", int32(42))),
 			)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"EqInt64": {
 			filter: must.NotFail(types.NewDocument(
 				"v", must.NotFail(types.NewDocument("$eq", int64(42))),
 			)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"EqFloat64": {
 			filter: must.NotFail(types.NewDocument(
 				"v", must.NotFail(types.NewDocument("$eq", float64(42.13))),
 			)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"EqMaxFloat64": {
 			filter: must.NotFail(types.NewDocument(
@@ -268,7 +282,7 @@ func TestPrepareWhereClause(t *testing.T) {
 			filter: must.NotFail(types.NewDocument(
 				"v", must.NotFail(types.NewDocument("$eq", true)),
 			)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"EqDatetime": {
 			filter: must.NotFail(types.NewDocument(
@@ -276,13 +290,13 @@ func TestPrepareWhereClause(t *testing.T) {
 					"$eq", time.Date(2021, 11, 1, 10, 18, 42, 123000000, time.UTC),
 				)),
 			)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 		"EqObjectID": {
 			filter: must.NotFail(types.NewDocument(
 				"v", must.NotFail(types.NewDocument("$eq", objectID)),
 			)),
-			expected: whereContain,
+			expected: whereEqV,
 		},
 
 		"NeString": {
@@ -424,4 +438,145 @@ func TestPrepareOrderByClause(t *testing.T) {
 			assert.Equal(t, tc.args, args)
 		})
 	}
+}
+
+func TestPrepareWhereClauseAnd(t *testing.T) {
+	t.Parallel()
+
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	arr := func(values ...any) *types.Array { return must.NotFail(types.NewArray(values...)) }
+
+	// The due cards shape: the board ids inside an $and, beside an $or that
+	// cannot be pushed down. The $in still reaches the boardId index.
+	filter := doc("archived", false, "$and", arr(
+		doc("boardId", doc("$in", arr("b1", "b2"))),
+		doc("$or", arr(doc("members", "u1"), doc("userId", "u1"))),
+	))
+	where, args, err := prepareWhereClause(new(metadata.Placeholder), filter)
+	require.NoError(t, err)
+	assert.Contains(t, where, `(_jsonb->'boardId' IN ($`)
+	assert.Contains(t, where, ` AND (((_jsonb->'boardId' IN (`)
+	assert.Contains(t, args, `"b1"`)
+	assert.Contains(t, args, `"b2"`)
+
+	// The same condition as without the wrapper.
+	flat, flatArgs, err := prepareWhereClause(new(metadata.Placeholder), doc("boardId", doc("$in", arr("b1", "b2"))))
+	require.NoError(t, err)
+	wrapped, wrappedArgs, err := prepareWhereClause(new(metadata.Placeholder),
+		doc("$and", arr(doc("boardId", doc("$in", arr("b1", "b2"))))))
+	require.NoError(t, err)
+	assert.Equal(t, ` WHERE ((`+strings.TrimPrefix(flat, ` WHERE `)+`))`, wrapped)
+	assert.Equal(t, flatArgs, wrappedArgs)
+
+	// Negative: an $and with nothing to push down adds nothing, and one that is
+	// not an array of documents is left to the Go filter.
+	for name, f := range map[string]*types.Document{
+		"an $or with a branch that cannot be pushed": doc("$and", arr(doc("$or", arr(doc("a", "x"), doc("b", types.Regex{Pattern: "y"}))))),
+		"not an array":    doc("$and", "x"),
+		"empty branches":  doc("$and", arr(doc(), "x")),
+		"an empty $and":   doc("$and", arr()),
+		"regex in branch": doc("$and", arr(doc("a", types.Regex{Pattern: "x"}))),
+	} {
+		where, args, err := prepareWhereClause(new(metadata.Placeholder), f)
+		require.NoError(t, err, name)
+		assert.Empty(t, where, name)
+		assert.Empty(t, args, name)
+	}
+}
+
+func TestPrepareWhereClauseOr(t *testing.T) {
+	t.Parallel()
+
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	arr := func(values ...any) *types.Array { return must.NotFail(types.NewArray(values...)) }
+
+	// The due cards $or: each branch an equality the database answers, so the
+	// database returns only the user's cards instead of every card of the boards.
+	or := doc("$or", arr(doc("members", "u1"), doc("assignees", "u1"), doc("userId", "u1")))
+	where, args, err := prepareWhereClause(new(metadata.Placeholder), or)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(where, ` WHERE ((`), where)
+	assert.Equal(t, 2, strings.Count(where, ") OR ("), where)
+	assert.Equal(t, []any{`"u1"`, `"u1"`, `"u1"`}, args, "one value per branch")
+	for _, field := range []string{"members", "assignees", "userId"} {
+		assert.Contains(t, where, `_jsonb->'`+field+`' = $`, field)
+	}
+
+	// Inside an $and, beside the board ids.
+	where, _, err = prepareWhereClause(new(metadata.Placeholder), doc("$and", arr(
+		doc("boardId", doc("$in", arr("b1"))), or)))
+	require.NoError(t, err)
+	assert.Contains(t, where, `_jsonb->'boardId' IN (`)
+	assert.Contains(t, where, ") OR (")
+
+	// Negative: one branch with nothing to push down could match anything, so
+	// the whole $or stays in Go - and gives its placeholders back: the next
+	// condition is still $1.
+	p := new(metadata.Placeholder)
+	where, args, err = prepareWhereClause(p, doc(
+		"$or", arr(doc("members", "u1"), doc("title", types.Regex{Pattern: "x"})),
+		"type", "card",
+	))
+	require.NoError(t, err)
+	assert.NotContains(t, where, "members", where)
+	assert.Contains(t, where, `_jsonb->'type' = $1`, where)
+	assert.NotContains(t, where, "$2", where)
+	assert.Equal(t, []any{`"card"`}, args)
+	assert.Equal(t, metadata.Placeholder(1), *p)
+}
+
+func TestPrepareWhereClauseElemMatch(t *testing.T) {
+	t.Parallel()
+
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	arr := func(values ...any) *types.Array { return must.NotFail(types.NewArray(values...)) }
+
+	// The visible boards of due cards: an $or of the open permissions and a
+	// membership. Every branch now reaches the database.
+	where, args, err := prepareWhereClause(new(metadata.Placeholder), doc("$or", arr(
+		doc("permission", "public"),
+		doc("members", doc("$elemMatch", doc("userId", "u1", "isActive", true))),
+	)))
+	require.NoError(t, err)
+	assert.Contains(t, where, `(_jsonb->'members' @> $2 OR _jsonb->'members' @> $3)`)
+	assert.Contains(t, where, `(_jsonb->'members' @> $4 OR _jsonb->'members' @> $5)`)
+	assert.Equal(t, []any{`"public"`, `[{"userId":"u1"}]`, `[{"userId":["u1"]}]`, `[{"isActive":true}]`, `[{"isActive":[true]}]`}, args)
+
+	// Negative: nothing usable in the $elemMatch, or a dotted array, pushes
+	// nothing - and so the $or around it stays in Go.
+	for name, f := range map[string]*types.Document{
+		"an operator":    doc("members", doc("$elemMatch", doc("userId", doc("$ne", "u1")))),
+		"a document":     doc("members", doc("$elemMatch", doc("user", doc("id", "u1")))),
+		"a dotted array": doc("a.members", doc("$elemMatch", doc("userId", "u1"))),
+		"NaN":            doc("members", doc("$elemMatch", doc("n", math.NaN()))),
+		"in an $or":      doc("$or", arr(doc("permission", "public"), doc("members", doc("$elemMatch", doc("userId", doc("$gt", "u")))))),
+	} {
+		where, args, err := prepareWhereClause(new(metadata.Placeholder), f)
+		require.NoError(t, err, name)
+		assert.Empty(t, where, name)
+		assert.Empty(t, args, name)
+	}
+}
+
+func TestPrepareWhereClauseOrDotted(t *testing.T) {
+	t.Parallel()
+
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	arr := func(values ...any) *types.Array { return must.NotFail(types.NewArray(values...)) }
+
+	// Negative: a dotted branch cannot be answered in SQL across an array of
+	// documents - the conformance case `$or across dotted array fields`
+	// returned nothing on PostgreSQL - so the $or stays in Go.
+	where, args, err := prepareWhereClause(new(metadata.Placeholder),
+		doc("$or", arr(doc("items.k", "b"), doc("items.missing", "x"))))
+	require.NoError(t, err)
+	assert.Empty(t, where)
+	assert.Empty(t, args)
+
+	// In an $and, the dotted key is left out and the rest still goes.
+	where, _, err = prepareWhereClause(new(metadata.Placeholder),
+		doc("$and", arr(doc("items.k", "b", "type", "card"))))
+	require.NoError(t, err)
+	assert.Contains(t, where, `_jsonb->'type'`)
+	assert.NotContains(t, where, "items")
 }

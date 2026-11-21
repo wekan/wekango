@@ -92,6 +92,17 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 		return nil, lazyerrors.Error(err)
 	}
 
+	// Membership tests through the arrays' GIN indexes (query_multikey.go).
+	if mk, mkArgs := multikeyWhere(&placeholder, meta, params.Filter); mk != "" {
+		if where == "" {
+			where = ` WHERE ` + mk
+		} else {
+			where += ` AND ` + mk
+		}
+
+		args = append(args, mkArgs...)
+	}
+
 	q += where
 
 	sort, sortArgs := prepareOrderByClause(params.Sort)
@@ -339,6 +350,17 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 		return nil, lazyerrors.Error(err)
 	}
 
+	// The same membership narrowing as Query.
+	if mk, mkArgs := multikeyWhere(&placeholder, meta, params.Filter); mk != "" {
+		if where == "" {
+			where = ` WHERE ` + mk
+		} else {
+			where += ` AND ` + mk
+		}
+
+		args = append(args, mkArgs...)
+	}
+
 	res.FilterPushdown = where != ""
 
 	q += where
@@ -457,6 +479,35 @@ func (c *collection) Stats(ctx context.Context, params *backends.CollectionStats
 		SizeFreeStorage: stats.sizeFreeStorage,
 		IndexSizes:      indexSizes,
 	}, nil
+}
+
+// CountAll implements backends.Collection interface.
+func (c *collection) CountAll(ctx context.Context, params *backends.CountAllParams) (*backends.CountAllResult, error) {
+	p, err := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	if p == nil {
+		return new(backends.CountAllResult), nil
+	}
+
+	coll, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	if coll == nil {
+		return new(backends.CountAllResult), nil
+	}
+
+	var res backends.CountAllResult
+	q := `SELECT COUNT(*) FROM ` + pgx.Identifier{c.dbName, coll.TableName}.Sanitize()
+	if err = p.QueryRow(ctx, q).Scan(&res.Count); err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	return &res, nil
 }
 
 // Compact implements backends.Collection interface.

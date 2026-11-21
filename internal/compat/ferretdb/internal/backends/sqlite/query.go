@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -448,6 +449,47 @@ func coveringIndexFields(keys []metadata.IndexKeyPair, needed map[string]struct{
 
 func collectIndexedFields(filter *types.Document, fields map[string]struct{}) {
 	for _, key := range filter.Keys() {
+		// A field that EVERY branch of an $or constrains narrows every match,
+		// whichever branch it matches by - {$or: [{boardId: {$in: A}},
+		// {boardId: {$in: B}, assignees: u}]} is a boardId lookup. Without it,
+		// such a selector could only use an index on its other, less selective
+		// fields, and SQLite read every row they matched.
+		if key == "$or" {
+			branches, ok := must.NotFail(filter.Get(key)).(*types.Array)
+			if !ok || branches.Len() == 0 {
+				continue
+			}
+
+			var common map[string]struct{}
+			for i := 0; i < branches.Len(); i++ {
+				branch, ok := must.NotFail(branches.Get(i)).(*types.Document)
+				if !ok {
+					common = nil
+					break
+				}
+
+				own := map[string]struct{}{}
+				collectIndexedFields(branch, own)
+
+				if common == nil {
+					common = own
+					continue
+				}
+
+				for field := range common {
+					if _, ok := own[field]; !ok {
+						delete(common, field)
+					}
+				}
+			}
+
+			for field := range common {
+				fields[field] = struct{}{}
+			}
+
+			continue
+		}
+
 		if key == "$and" {
 			branches, ok := must.NotFail(filter.Get(key)).(*types.Array)
 			if !ok {
@@ -603,7 +645,28 @@ func jsonPathExpr(key string) string {
 // path, so they stay in the Go filter. `expr` is the nested chain; the key is passed
 // as "" so equality/inCondition use their non-_id (array-containment) form — a dotted
 // path is never _id. Still a SUPERSET, so the Go filter stays authoritative.
+//
+// MongoDB's dotted matching also walks through arrays ("a.b" matches
+// {a: [{b: x}]}), which the -> chain does not: on an array, or wherever the
+// path stops resolving, it yields NULL. Every condition is therefore ORed with
+// `expr IS NULL`, so such a row stays a candidate for the Go filter instead of
+// being dropped. That arm reads the same expression, so SQLite still answers
+// the whole condition from the dotted expression index (MULTI-INDEX OR) - and
+// it is what makes it safe for the handler to pass dotted keys here at all
+// (handler.NewOpts.NestedPushdownSuperset). An empty $in ("0") matches nothing
+// even through an array and is returned as it is.
 func pushdownDottedFieldCondition(expr string, v any) (string, []any, bool) {
+	cond, args, ok := dottedFieldMatch(expr, v)
+	if !ok || cond == "0" {
+		return cond, args, ok
+	}
+
+	return fmt.Sprintf(`(%s OR %s IS NULL)`, cond, expr), args, true
+}
+
+// dottedFieldMatch is pushdownDottedFieldCondition without the unresolved-path
+// arm: the condition for a dotted path that resolves to a value.
+func dottedFieldMatch(expr string, v any) (string, []any, bool) {
 	switch val := v.(type) {
 	case string:
 		if !pushdownSafeString(val) {
@@ -664,6 +727,19 @@ func regexCondition(expr, pattern, options string) (string, []any, bool) {
 // a SUPERSET of any ONE of them is a valid superset of the whole expression —
 // coexisting operators ($ne, $nin, $options, …) do not make this unsafe.
 func operatorCondition(expr, key string, doc *types.Document) (string, []any, bool) {
+	// {field: {$eq: v}} of a scalar is {field: v}: the same pushdown, which a
+	// client that writes every equality as $eq (so a value from a request can
+	// never be read as an operator) otherwise never got - each lookup by _id
+	// scanned and decoded the whole collection.
+	if eqAny, err := doc.Get("$eq"); err == nil {
+		switch eqAny.(type) {
+		case string, types.ObjectID, bool:
+			if cond, condArgs, ok := pushdownFieldCondition(expr, key, eqAny); ok {
+				return cond, condArgs, true
+			}
+		}
+	}
+
 	if existsAny, err := doc.Get("$exists"); err == nil {
 		if exists, ok := existsAny.(bool); ok {
 			if exists {
@@ -737,7 +813,14 @@ func elemMatchCondition(expr string, doc *types.Document) (string, []any, bool) 
 		}
 
 		value := must.NotFail(doc.Get(key))
-		innerExpr := fmt.Sprintf(`element.value->%s`, quoteJSONLabel(key))
+		// json_each returns a SCALAR element as a plain SQL value, and -> or
+		// json_type on that value fails with "malformed JSON" - for the whole
+		// query, as soon as one document's array holds a string. The element's
+		// type column needs no parsing, so the key is read from objects only.
+		// And the key is a string literal, not ->"key": beside json_each a
+		// "key", "value", "type", "id" or "path" is that json_each column, and
+		// {$elemMatch: {key: X}} compared X with the element's array index.
+		innerExpr := fmt.Sprintf(`(CASE WHEN element.type = 'object' THEN element.value->%s END)`, metadata.LabelLiteral(key))
 
 		var condition string
 		var conditionArgs []any
@@ -771,14 +854,29 @@ func elemMatchCondition(expr string, doc *types.Document) (string, []any, bool) 
 		args = append(args, conditionArgs...)
 	}
 
+	// json_type and json_each are given the array as the column and a path, not
+	// as the text of ->: ->'members' renders the whole array as JSON text, and
+	// json_each then parses that text again - for every row, on every membership
+	// test, which is every All Boards and Due Cards query. Read from the column,
+	// SQLite walks the binary JSON in place. On 2,308 boards that took the
+	// visible-boards query from 26 to 16 ms, with the same rows.
+	arrayArgs := expr
+	if m := simpleFieldExpr.FindStringSubmatch(expr); m != nil {
+		arrayArgs = fmt.Sprintf(`%s, '$."%s"'`, metadata.DefaultColumn, m[1])
+	}
+
 	return fmt.Sprintf(
 		`(json_type(%[1]s) = 'array' AND EXISTS (`+
 			`SELECT 1 FROM json_each(%[1]s) AS element `+
-			`WHERE json_type(element.value) = 'object' AND %s))`,
-		expr,
+			`WHERE element.type = 'object' AND %s))`,
+		arrayArgs,
 		strings.Join(conditions, " AND "),
 	), args, true
 }
+
+// simpleFieldExpr matches _ferretdb_sjson->"name" for a plain top-level field name:
+// letters, digits, underscore and dash, which need no escaping in a JSON path.
+var simpleFieldExpr = regexp.MustCompile(`^` + regexp.QuoteMeta(metadata.DefaultColumn) + `->"([A-Za-z0-9_-]+)"$`)
 
 // rangeConditions pushes numeric/date range operators ($gt/$gte/$lt/$lte) using
 // the ->> (SQL value) accessor, so SQLite compares the extracted number
@@ -936,7 +1034,7 @@ func inCondition(expr, key string, arr *types.Array) (string, []any, bool) {
 // Registry.indexesCreate does (%q), so the WHERE expression text matches the
 // expression-index text and SQLite's index matcher can pair them up.
 func quoteJSONLabel(field string) string {
-	return fmt.Sprintf("%q", field)
+	return metadata.JSONLabel(field)
 }
 
 // prepareOrderByClause returns ORDER BY clause for given sort document.

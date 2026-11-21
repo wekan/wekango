@@ -16,18 +16,15 @@ package sqlite
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
-	sqlite3 "modernc.org/sqlite"
-	sqlite3lib "modernc.org/sqlite/lib"
-
 	"github.com/FerretDB/FerretDB/internal/backends"
 	"github.com/FerretDB/FerretDB/internal/backends/sqlite/metadata"
+	"github.com/FerretDB/FerretDB/internal/backends/sqlite/metadata/pool"
 	"github.com/FerretDB/FerretDB/internal/handler/sjson"
 	"github.com/FerretDB/FerretDB/internal/types"
 	"github.com/FerretDB/FerretDB/internal/util/fsql"
@@ -60,7 +57,10 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 		}, nil
 	}
 
-	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+	meta, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
 	if meta == nil {
 		return &backends.QueryResult{
 			Iter: newQueryIterator(ctx, nil, params.OnlyRecordIDs),
@@ -75,6 +75,14 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 			fmt.Sprintf(`%s->>%s`, metadata.DefaultColumn, quoteJSONLabel(field)))
 		if _, err := db.ExecContext(ctx, q); err == nil {
 			index = numericIndex
+		}
+	}
+	// An array membership filter: candidates by _id from the multikey side
+	// table (query_multikey.go), read through the unique _id index.
+	mkCond, mkArgs, mkIndex, mkOK := "", []any(nil), "", false
+	if index == "" {
+		if mkCond, mkArgs, mkIndex, mkOK = multikeyCandidates(meta, params.Filter); mkOK {
+			index = mkIndex
 		}
 	}
 	if index == "" {
@@ -93,12 +101,42 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 	// only a bare {_id: X} filter was pushed down, so every other query decoded
 	// the WHOLE collection in Go on every Meteor poll.
 	whereClause, args := prepareWhereClause(params.Filter)
+	if mkOK {
+		if whereClause == "" {
+			whereClause = ` WHERE ` + mkCond
+		} else {
+			whereClause += ` AND ` + mkCond
+		}
+		args = append(args, mkArgs...)
+	}
+	if meta.Capped() && params.StartRecordID != 0 {
+		if whereClause == "" {
+			whereClause = " WHERE "
+		} else {
+			whereClause += " AND "
+		}
+		whereClause += metadata.RecordIDColumn + " >= ?"
+		args = append(args, params.StartRecordID)
+	}
 	if distinctPushdown {
 		exists := `json_type(` + jsonPathExpr(params.DistinctField) + `) IS NOT NULL`
 		if whereClause == "" {
 			whereClause = ` WHERE ` + exists
 		} else {
 			whereClause += ` AND ` + exists
+		}
+	}
+
+	// The client's sort, applied by SQLite when it can be (query_ordered.go).
+	if params.OrderBy.Len() > 0 && params.Sort.Len() == 0 && params.Limit == 0 &&
+		!meta.Capped() && !params.OnlyRecordIDs && !distinctPushdown {
+		if orderBy := orderByClause(params.OrderBy); orderBy != "" {
+			iter, err := queryOrdered(ctx, db, meta.TableName, indexClause+whereClause+orderBy, args, params.DecodeFields)
+			if err != nil {
+				return nil, lazyerrors.Error(err)
+			}
+
+			return &backends.QueryResult{Iter: iter, Ordered: true}, nil
 		}
 	}
 
@@ -126,13 +164,17 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 	iter := newQueryIterator(ctx, rows, params.OnlyRecordIDs, params.DecodeFields)
 	if os.Getenv("DEBUGSPEED") == "true" {
 		iter = newSpeedQueryIterator(iter, &querySpeed{
-			logger:        c.r.Logger(),
-			database:      c.dbName,
-			collection:    c.name,
-			operation:     params.Operation,
-			filterFields:  queryFieldNames(params.Filter),
-			sortFields:    queryFieldNames(params.Sort),
-			index:         index,
+			logger:       c.r.Logger(),
+			database:     c.dbName,
+			collection:   c.name,
+			operation:    params.Operation,
+			filterFields: queryFieldNames(params.Filter),
+			sortFields:   queryFieldNames(params.Sort),
+			index:        index,
+			// The statement text holds only `?` placeholders, never a filter
+			// value, so it is as shareable as the field names above - and it
+			// is what tells which WHERE / ORDER BY SQLite actually ran.
+			sql:           q,
 			limit:         params.Limit,
 			queryDuration: queryDuration,
 		})
@@ -158,16 +200,25 @@ func (c *collection) InsertAll(ctx context.Context, params *backends.InsertAllPa
 	// tokens, ...) stalled all concurrent readers' RLocks — a steady stream of
 	// small Meteor writes kept every polling query futex-waiting. CollectionCreate
 	// is idempotent, so two racing first inserts are still safe.
-	if c.r.CollectionGet(ctx, c.dbName, c.name) == nil {
+	meta, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+	if meta == nil {
 		if _, err := c.r.CollectionCreate(ctx, &metadata.CollectionCreateParams{DBName: c.dbName, Name: c.name}); err != nil {
 			return nil, lazyerrors.Error(err)
 		}
+		meta, err = c.r.CollectionGet(ctx, c.dbName, c.name)
+		if err != nil {
+			return nil, lazyerrors.Error(err)
+		}
+	}
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil || meta == nil {
+		return nil, backends.NewError(backends.ErrorCodeCollectionDoesNotExist, nil)
 	}
 
-	db := c.r.DatabaseGetExisting(ctx, c.dbName)
-	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
-
-	err := db.InTransaction(ctx, func(tx *fsql.Tx) error {
+	err = db.InTransaction(ctx, func(tx *fsql.Tx) error {
 		batchSize := c.r.BatchSize
 		if batchSize < 1 {
 			panic("batch-size should be greater or equal to 1")
@@ -180,14 +231,13 @@ func (c *collection) InsertAll(ctx context.Context, params *backends.InsertAllPa
 			i := min(batchSize, len(docs))
 			batch, docs = docs[:i], docs[i:]
 
-			q, args, err := prepareInsertStatement(meta.TableName, meta.Capped(), batch)
+			q, args, err := prepareInsertStatement(meta.TableName, meta.Capped(), meta.JSONB(), batch)
 			if err != nil {
 				return lazyerrors.Error(err)
 			}
 
 			if _, err = tx.ExecContext(ctx, q, args...); err != nil {
-				var se *sqlite3.Error
-				if errors.As(err, &se) && se.Code() == sqlite3lib.SQLITE_CONSTRAINT_UNIQUE {
+				if pool.IsUniqueConstraint(err) {
 					return backends.NewError(backends.ErrorCodeInsertDuplicateID, err)
 				}
 
@@ -212,14 +262,22 @@ func (c *collection) UpdateAll(ctx context.Context, params *backends.UpdateAllPa
 		return &res, nil
 	}
 
-	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+	meta, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
 	if meta == nil {
 		return &res, nil
 	}
 
-	q := fmt.Sprintf(`UPDATE %q SET %s = ? WHERE %s = ?`, meta.TableName, metadata.DefaultColumn, metadata.IDColumn)
+	value := "?"
+	if meta.JSONB() {
+		value = "jsonb(?)"
+	}
 
-	err := db.InTransaction(ctx, func(tx *fsql.Tx) error {
+	q := fmt.Sprintf(`UPDATE %q SET %s = %s WHERE %s = ?`, meta.TableName, metadata.DefaultColumn, value, metadata.IDColumn)
+
+	err = db.InTransaction(ctx, func(tx *fsql.Tx) error {
 		for _, doc := range params.Docs {
 			b, err := sjson.Marshal(doc)
 			if err != nil {
@@ -260,7 +318,10 @@ func (c *collection) DeleteAll(ctx context.Context, params *backends.DeleteAllPa
 		return &backends.DeleteAllResult{Deleted: 0}, nil
 	}
 
-	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+	meta, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
 	if meta == nil {
 		return &backends.DeleteAllResult{Deleted: 0}, nil
 	}
@@ -319,7 +380,10 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 		}, nil
 	}
 
-	meta := c.r.CollectionGet(ctx, c.dbName, c.name)
+	meta, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
 	if meta == nil {
 		return &backends.ExplainResult{
 			QueryPlanner: must.NotFail(types.NewDocument()),
@@ -327,13 +391,24 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 	}
 
 	selectClause := prepareSelectClause(meta.TableName, "", meta.Capped(), false)
-	if index := preferredCompoundIndex(meta.TableName, meta.Settings.Indexes, params.Filter); index != "" {
+	mkCond, mkArgs, mkIndex, mkOK := multikeyCandidates(meta, params.Filter)
+	if mkOK {
+		selectClause += fmt.Sprintf(` INDEXED BY %q`, mkIndex)
+	} else if index := preferredCompoundIndex(meta.TableName, meta.Settings.Indexes, params.Filter); index != "" {
 		selectClause += fmt.Sprintf(` INDEXED BY %q`, index)
 	}
 
 	// Same pushdown as Query — top-level equality conditions
 	// (superset semantics; the Go filter stays authoritative).
 	whereClause, args := prepareWhereClause(params.Filter)
+	if mkOK {
+		if whereClause == "" {
+			whereClause = ` WHERE ` + mkCond
+		} else {
+			whereClause += ` AND ` + mkCond
+		}
+		args = append(args, mkArgs...)
+	}
 	filterPushdown := whereClause != ""
 
 	orderByClause := prepareOrderByClause(params.Sort)
@@ -396,7 +471,10 @@ func (c *collection) Stats(ctx context.Context, params *backends.CollectionStats
 		)
 	}
 
-	coll := c.r.CollectionGet(ctx, c.dbName, c.name)
+	coll, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
 	if coll == nil {
 		return nil, backends.NewError(
 			backends.ErrorCodeCollectionDoesNotExist,
@@ -472,6 +550,29 @@ func (c *collection) Stats(ctx context.Context, params *backends.CollectionStats
 	}, nil
 }
 
+// CountAll implements backends.Collection interface.
+func (c *collection) CountAll(ctx context.Context, params *backends.CountAllParams) (*backends.CountAllResult, error) {
+	db := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if db == nil {
+		return new(backends.CountAllResult), nil
+	}
+
+	meta, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+	if meta == nil {
+		return new(backends.CountAllResult), nil
+	}
+
+	var res backends.CountAllResult
+	if err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q`, meta.TableName)).Scan(&res.Count); err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	return &res, nil
+}
+
 // Compact implements backends.Collection interface.
 func (c *collection) Compact(ctx context.Context, params *backends.CompactParams) (*backends.CompactResult, error) {
 	db := c.r.DatabaseGetExisting(ctx, c.dbName)
@@ -482,7 +583,10 @@ func (c *collection) Compact(ctx context.Context, params *backends.CompactParams
 		)
 	}
 
-	coll := c.r.CollectionGet(ctx, c.dbName, c.name)
+	coll, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
 	if coll == nil {
 		return nil, backends.NewError(
 			backends.ErrorCodeCollectionDoesNotExist,
@@ -512,7 +616,10 @@ func (c *collection) ListIndexes(ctx context.Context, params *backends.ListIndex
 		)
 	}
 
-	coll := c.r.CollectionGet(ctx, c.dbName, c.name)
+	coll, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
 	if coll == nil {
 		return nil, backends.NewError(
 			backends.ErrorCodeCollectionDoesNotExist,

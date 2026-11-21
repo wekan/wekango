@@ -49,6 +49,7 @@ type Collection interface {
 	DeleteAll(context.Context, *DeleteAllParams) (*DeleteAllResult, error)
 
 	Stats(context.Context, *CollectionStatsParams) (*CollectionStatsResult, error)
+	CountAll(context.Context, *CountAllParams) (*CountAllResult, error)
 	Compact(context.Context, *CompactParams) (*CompactResult, error)
 
 	ListIndexes(context.Context, *ListIndexesParams) (*ListIndexesResult, error)
@@ -75,9 +76,13 @@ func CollectionContract(c Collection) Collection {
 
 // QueryParams represents the parameters of Collection.Query method.
 type QueryParams struct {
-	Filter *types.Document
-	Sort   *types.Document
-	Limit  int64
+	// StartRecordID is an inclusive lower bound for a forward tailable cursor
+	// on a capped collection. Backends may ignore it; Cursor.Reset still seeks
+	// the checkpoint before returning new documents.
+	StartRecordID int64
+	Filter        *types.Document
+	Sort          *types.Document
+	Limit         int64
 	// DecodeFields lets document backends avoid recursively decoding fields that
 	// the handler's inclusion projection, filter and sort cannot observe. Other
 	// backends may ignore it and return complete documents.
@@ -90,11 +95,25 @@ type QueryParams struct {
 
 	OnlyRecordIDs bool
 	Comment       string
+
+	// OrderBy is the client's sort (top-level fields, 1 or -1), which a
+	// backend MAY apply; Sort above is the one it must. A backend that applies it
+	// says so in QueryResult.Ordered.
+	OrderBy *types.Document
 }
 
 // QueryResult represents the results of Collection.Query method.
 type QueryResult struct {
 	Iter types.DocumentsIterator
+
+	// Ordered is set when the backend applied QueryParams.OrderBy, in this
+	// sense: every document whose OrderBy fields are all simple values - missing,
+	// null, a number (not NaN or an infinity), a string, an ObjectID, a bool or a
+	// date - comes in MongoDB's order for them, with ties in storage order, and
+	// every other document comes BEFORE all of those. So the handler may stream
+	// the documents in order once the first one it keeps is simple, and must sort
+	// as before when it is not (common.OrderedSortIterator).
+	Ordered bool
 }
 
 // Query executes a query against the collection.
@@ -318,6 +337,34 @@ type CollectionStatsResult struct {
 	SizeCollection  int64
 	SizeFreeStorage int64
 	IndexSizes      []IndexSize
+}
+
+// CountAllParams represents the parameters of Collection.CountAll method.
+type CountAllParams struct{}
+
+// CountAllResult represents the results of Collection.CountAll method.
+type CountAllResult struct {
+	Count int64
+}
+
+// CountAll returns the EXACT number of documents in the collection, counted by
+// the database itself (SELECT COUNT(*)) - unlike Stats, whose count may be an
+// estimate. A count with an empty filter used to fetch and decode every
+// document to count them.
+//
+// A collection or database that does not exist has no documents.
+func (cc *collectionContract) CountAll(ctx context.Context, params *CountAllParams) (*CountAllResult, error) {
+	ctx, span := otel.Tracer("").Start(ctx, "CollectionCountAll")
+	defer span.End()
+
+	res, err := cc.c.CountAll(ctx, params)
+	if err != nil {
+		span.SetStatus(otelcodes.Error, "")
+	}
+
+	checkError(err)
+
+	return res, err
 }
 
 // IndexSize represents the name and the size of an index.

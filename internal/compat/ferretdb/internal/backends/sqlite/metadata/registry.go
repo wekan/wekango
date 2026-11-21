@@ -92,6 +92,11 @@ func NewRegistry(u string, batchSize int, l *slog.Logger, sp *state.Provider) (*
 			return nil, lazyerrors.Error(err)
 		}
 	}
+	if err = r.upgradeStorage(context.Background(), initDBs); err != nil {
+		r.Close()
+		return nil, lazyerrors.Error(err)
+	}
+
 	if err = r.upgradeIndexFormats(context.Background(), initDBs); err != nil {
 		r.Close()
 		return nil, lazyerrors.Error(err)
@@ -142,6 +147,44 @@ func (r *Registry) initCollections(ctx context.Context, dbName string, db *fsql.
 	return nil
 }
 
+// discoverCollections adds newly committed registrations from an external
+// SQLite connection. Existing cached metadata continues to be owned by the
+// registry. The caller holds the write lock.
+func (r *Registry) discoverCollections(ctx context.Context, dbName string, db *fsql.DB, name string) error {
+	query := fmt.Sprintf(`SELECT m.name, m.table_name, m.settings FROM %q m
+		JOIN sqlite_schema s ON s.type = 'table' AND s.name = m.table_name`, metadataTableName)
+	var args []any
+	if name != "" {
+		query += " WHERE m.name = ?"
+		args = append(args, name)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return lazyerrors.Error(err)
+	}
+	defer rows.Close()
+	discovered := map[string]*Collection{}
+	for rows.Next() {
+		c := new(Collection)
+		if err = rows.Scan(&c.Name, &c.TableName, &c.Settings); err != nil {
+			return lazyerrors.Error(err)
+		}
+		discovered[c.Name] = c
+	}
+	if err = rows.Err(); err != nil {
+		return lazyerrors.Error(err)
+	}
+	if r.colls[dbName] == nil {
+		r.colls[dbName] = map[string]*Collection{}
+	}
+	for name, c := range discovered {
+		if r.colls[dbName][name] == nil {
+			r.colls[dbName][name] = c
+		}
+	}
+	return nil
+}
+
 type indexUpgradeProgress struct {
 	Phase      string    `json:"phase"`
 	Database   string    `json:"database,omitempty"`
@@ -182,7 +225,7 @@ func (r *Registry) upgradeIndexFormats(ctx context.Context, dbs map[string]*fsql
 			continue
 		}
 		for _, c := range colls {
-			if c.Settings.IndexFormat >= CurrentIndexFormat {
+			if c.Settings.IndexFormat >= coveringIndexFormat {
 				continue
 			}
 			for _, index := range c.Settings.Indexes {
@@ -236,8 +279,15 @@ func (r *Registry) upgradeIndexFormat(
 	)
 
 	err := db.InTransaction(ctx, func(tx *fsql.Tx) error {
+		// Format 3: the multikey side tables, built from the existing documents.
+		// A collection already at format 2 gets only this step: its covering
+		// indexes are not rebuilt again.
+		if err := ensureMultikey(ctx, tx, c.TableName, c.Settings.Indexes); err != nil {
+			return lazyerrors.Error(err)
+		}
+
 		for _, index := range c.Settings.Indexes {
-			if !coveringDistinctIndex(index) {
+			if c.Settings.IndexFormat >= coveringIndexFormat || !coveringDistinctIndex(index) {
 				continue
 			}
 			progress.Database = dbName
@@ -293,7 +343,7 @@ func indexCreateSQL(table string, index IndexInfo) string {
 	for i, key := range index.Key {
 		fields := strings.Split(key.Field, ".")
 		for j, f := range fields {
-			fields[j] = fmt.Sprintf("%q", f)
+			fields[j] = JSONLabel(f)
 		}
 
 		columns[i] = fmt.Sprintf("%s->%s", DefaultColumn, strings.Join(fields, "->"))
@@ -312,12 +362,22 @@ func indexCreateSQL(table string, index IndexInfo) string {
 
 // DatabaseList returns a sorted list of existing databases.
 func (r *Registry) DatabaseList(ctx context.Context) []string {
+	for _, name := range r.p.FileNames() {
+		r.DatabaseGetExisting(ctx, name)
+	}
 	return r.p.List(ctx)
 }
 
 // DatabaseGetExisting returns a connection to existing database or nil if it doesn't exist.
 func (r *Registry) DatabaseGetExisting(ctx context.Context, dbName string) *fsql.DB {
-	return r.p.GetExisting(ctx, dbName)
+	if db := r.p.GetExisting(ctx, dbName); db != nil {
+		return db
+	}
+	return r.p.Discover(ctx, dbName, func(db *fsql.DB) bool {
+		var kind string
+		return db.QueryRowContext(ctx, "SELECT type FROM sqlite_schema WHERE name = ?", metadataTableName).Scan(&kind) == nil &&
+			kind == "table"
+	})
 }
 
 // DatabaseGetOrCreate returns a connection to existing database or newly created database.
@@ -332,15 +392,9 @@ func (r *Registry) DatabaseGetOrCreate(ctx context.Context, dbName string) (*fsq
 //
 // It does not hold the lock.
 func (r *Registry) databaseGetOrCreate(ctx context.Context, dbName string) (*fsql.DB, error) {
-	db, created, err := r.p.GetOrCreate(ctx, dbName)
-	if err != nil {
-		return nil, lazyerrors.Error(err)
-	}
-
-	if !created {
+	if db := r.DatabaseGetExisting(ctx, dbName); db != nil {
 		return db, nil
 	}
-
 	q := fmt.Sprintf(
 		"CREATE TABLE %q ("+
 			"name TEXT NOT NULL UNIQUE CHECK(name != ''), "+
@@ -349,8 +403,25 @@ func (r *Registry) databaseGetOrCreate(ctx context.Context, dbName string) (*fsq
 			") STRICT",
 		metadataTableName,
 	)
-	if _, err = db.ExecContext(ctx, q); err != nil {
-		r.databaseDrop(ctx, dbName)
+	db, _, err := r.p.GetOrCreate(ctx, dbName, func(db *fsql.DB) error {
+		return db.InTransaction(ctx, func(tx *fsql.Tx) error {
+			var registered, occupied bool
+			if queryErr := tx.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?
+		), EXISTS (SELECT 1 FROM sqlite_schema)`, metadataTableName).Scan(&registered, &occupied); queryErr != nil {
+				return queryErr
+			}
+			if registered {
+				return nil
+			}
+			if occupied {
+				return fmt.Errorf("SQLite database %q is not a registered database", dbName)
+			}
+			_, createErr := tx.ExecContext(ctx, q)
+			return createErr
+		})
+	})
+	if err != nil {
 		return nil, lazyerrors.Error(err)
 	}
 
@@ -373,6 +444,9 @@ func (r *Registry) DatabaseDrop(ctx context.Context, dbName string) bool {
 //
 // It does not hold the lock.
 func (r *Registry) databaseDrop(ctx context.Context, dbName string) bool {
+	if r.DatabaseGetExisting(ctx, dbName) == nil {
+		return false
+	}
 	delete(r.colls, dbName)
 
 	return r.p.Drop(ctx, dbName)
@@ -382,19 +456,25 @@ func (r *Registry) databaseDrop(ctx context.Context, dbName string) bool {
 //
 // If database does not exist, no error is returned.
 func (r *Registry) CollectionList(ctx context.Context, dbName string) ([]*Collection, error) {
+	// The connection is taken while holding the lock: DatabaseDrop closes it
+	// under the same lock, so one fetched before would be closed underneath
+	// discoverCollections ("sql: database is closed").
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
 	db := r.DatabaseGetExisting(ctx, dbName)
 	if db == nil {
 		return nil, nil
 	}
 
-	r.rw.RLock()
+	if err := r.discoverCollections(ctx, dbName, db, ""); err != nil {
+		return nil, err
+	}
 
 	res := make([]*Collection, 0, len(r.colls[dbName]))
 	for _, c := range r.colls[dbName] {
 		res = append(res, c.deepCopy())
 	}
-
-	r.rw.RUnlock()
 
 	sort.Slice(res, func(i, j int) bool { return res[i].Name < res[j].Name })
 	return res, nil
@@ -441,8 +521,14 @@ func (r *Registry) collectionCreate(ctx context.Context, params *CollectionCreat
 		return false, lazyerrors.Error(err)
 	}
 
+	if r.colls[dbName][collectionName] != nil {
+		return false, nil
+	}
+	if err = r.discoverCollections(ctx, dbName, db, ""); err != nil {
+		return false, err
+	}
 	colls := r.colls[dbName]
-	if colls != nil && colls[collectionName] != nil {
+	if colls[collectionName] != nil {
 		return false, nil
 	}
 
@@ -484,15 +570,28 @@ func (r *Registry) collectionCreate(ctx context.Context, params *CollectionCreat
 		q += fmt.Sprintf("%s INTEGER PRIMARY KEY, ", RecordIDColumn)
 	}
 
-	q += fmt.Sprintf("%[1]s TEXT NOT NULL CHECK(%[1]s != '')) STRICT", DefaultColumn)
+	// SQLite JSONB (storage.go). A STRICT BLOB column refuses text, so nothing
+	// can write the old form into it.
+	q += fmt.Sprintf("%s BLOB NOT NULL) STRICT", DefaultColumn)
 
 	if _, err = db.ExecContext(ctx, q); err != nil {
 		return false, lazyerrors.Error(err)
 	}
 
+	// An adopted orphan keeps the form its column has.
+	storage, err := tableStorage(ctx, db, tableName)
+	if err != nil {
+		return false, lazyerrors.Error(err)
+	}
+
 	q = fmt.Sprintf("INSERT INTO %q (name, table_name, settings) VALUES (?, ?, ?)", metadataTableName)
 	if _, err = db.ExecContext(ctx, q, collectionName, tableName, "{}"); err != nil {
-		_, _ = db.ExecContext(ctx, fmt.Sprintf("DROP TABLE %q", tableName))
+		// The conflicting registration may have committed after discovery.
+		// Never drop a physical table that another connection may now own.
+		if discoverErr := r.discoverCollections(ctx, dbName, db, collectionName); discoverErr == nil &&
+			r.colls[dbName][collectionName] != nil {
+			return false, nil
+		}
 		return false, lazyerrors.Error(err)
 	}
 
@@ -507,6 +606,7 @@ func (r *Registry) collectionCreate(ctx context.Context, params *CollectionCreat
 			CappedSize:      params.CappedSize,
 			CappedDocuments: params.CappedDocuments,
 			IndexFormat:     CurrentIndexFormat,
+			Storage:         storage,
 		},
 	}
 
@@ -541,15 +641,34 @@ func (r *Registry) collectionCreate(ctx context.Context, params *CollectionCreat
 	return true, nil
 }
 
-// CollectionGet returns a copy of collection metadata.
-// It can be safely modified by a caller.
-//
-// If database or collection does not exist, nil is returned.
-func (r *Registry) CollectionGet(ctx context.Context, dbName, collectionName string) *Collection {
+// CollectionGet returns a copy of collection metadata, or nil for an absent
+// database or collection. Discovery errors are returned separately.
+func (r *Registry) CollectionGet(ctx context.Context, dbName, collectionName string) (*Collection, error) {
 	r.rw.RLock()
-	defer r.rw.RUnlock()
+	c := r.collectionGet(dbName, collectionName)
+	r.rw.RUnlock()
+	if c != nil {
+		return c, nil
+	}
 
-	return r.collectionGet(dbName, collectionName)
+	r.rw.Lock()
+	defer r.rw.Unlock()
+	return r.lookupCollection(ctx, dbName, collectionName)
+}
+
+// lookupCollection may add a registration to the cache. The caller holds the write lock.
+func (r *Registry) lookupCollection(ctx context.Context, dbName, collectionName string) (*Collection, error) {
+	if c := r.collectionGet(dbName, collectionName); c != nil {
+		return c, nil
+	}
+	db := r.DatabaseGetExisting(ctx, dbName)
+	if db == nil {
+		return nil, nil
+	}
+	if err := r.discoverCollections(ctx, dbName, db, collectionName); err != nil {
+		return nil, err
+	}
+	return r.collectionGet(dbName, collectionName), nil
 }
 
 // collectionGet returns a copy of collection metadata.
@@ -590,7 +709,10 @@ func (r *Registry) collectionDrop(ctx context.Context, dbName, collectionName st
 		return false, nil
 	}
 
-	c := r.collectionGet(dbName, collectionName)
+	c, err := r.lookupCollection(ctx, dbName, collectionName)
+	if err != nil {
+		return false, err
+	}
 	if c == nil {
 		return false, nil
 	}
@@ -602,6 +724,11 @@ func (r *Registry) collectionDrop(ctx context.Context, dbName, collectionName st
 
 	q = fmt.Sprintf("DROP TABLE %q", c.TableName)
 	if _, err := db.ExecContext(ctx, q); err != nil {
+		return false, lazyerrors.Error(err)
+	}
+
+	// The triggers went with the table; the side tables are tables of their own.
+	if err := dropUnusedMultikey(ctx, db, c.TableName, c.Settings.Indexes, nil); err != nil {
 		return false, lazyerrors.Error(err)
 	}
 
@@ -617,15 +744,19 @@ func (r *Registry) collectionDrop(ctx context.Context, dbName, collectionName st
 // Returned boolean value indicates whether the collection was renamed.
 // If database or collection did not exist, (false, nil) is returned.
 func (r *Registry) CollectionRename(ctx context.Context, dbName, oldCollectionName, newCollectionName string) (bool, error) {
+	// As CollectionList: the connection is taken while holding the lock.
+	r.rw.Lock()
+	defer r.rw.Unlock()
+
 	db := r.DatabaseGetExisting(ctx, dbName)
 	if db == nil {
 		return false, nil
 	}
 
-	r.rw.Lock()
-	defer r.rw.Unlock()
-
-	c := r.collectionGet(dbName, oldCollectionName)
+	c, err := r.lookupCollection(ctx, dbName, oldCollectionName)
+	if err != nil {
+		return false, err
+	}
 	if c == nil {
 		return false, nil
 	}
@@ -674,6 +805,7 @@ func (r *Registry) indexesCreate(ctx context.Context, dbName, collectionName str
 	}
 
 	created := make([]string, 0, len(indexes))
+	existing := slices.Clone(c.Settings.Indexes)
 
 	for _, index := range indexes {
 		if slices.ContainsFunc(c.Settings.Indexes, func(i IndexInfo) bool { return index.Name == i.Name }) {
@@ -693,6 +825,21 @@ func (r *Registry) indexesCreate(ctx context.Context, dbName, collectionName str
 
 		created = append(created, index.Name)
 		c.Settings.Indexes = append(c.Settings.Indexes, index)
+	}
+
+	// The multikey side tables of paths no earlier index had, filled from the
+	// documents already in the collection. A path that already has one is not
+	// backfilled again.
+	var added []IndexInfo
+	for _, index := range c.Settings.Indexes[len(existing):] {
+		if a, f, ok := MultikeyPath(index); ok && !slices.Contains(multikeyPaths(existing), [2]string{a, f}) {
+			added = append(added, index)
+		}
+	}
+
+	if err := ensureMultikey(ctx, db, c.TableName, added); err != nil {
+		_ = r.indexesDrop(ctx, dbName, collectionName, created)
+		return lazyerrors.Error(err)
 	}
 
 	q := fmt.Sprintf("UPDATE %q SET settings = ? WHERE table_name = ?", metadataTableName)
@@ -726,7 +873,10 @@ func (r *Registry) IndexesDrop(ctx context.Context, dbName, collectionName strin
 //
 // It does not hold the lock.
 func (r *Registry) indexesDrop(ctx context.Context, dbName, collectionName string, indexNames []string) error {
-	c := r.collectionGet(dbName, collectionName)
+	c, err := r.lookupCollection(ctx, dbName, collectionName)
+	if err != nil {
+		return err
+	}
 	if c == nil {
 		return nil
 	}
@@ -735,6 +885,8 @@ func (r *Registry) indexesDrop(ctx context.Context, dbName, collectionName strin
 	if db == nil {
 		return nil
 	}
+
+	var dropped []IndexInfo
 
 	for _, name := range indexNames {
 		i := slices.IndexFunc(c.Settings.Indexes, func(i IndexInfo) bool { return name == i.Name })
@@ -747,7 +899,13 @@ func (r *Registry) indexesDrop(ctx context.Context, dbName, collectionName strin
 			return lazyerrors.Error(err)
 		}
 
+		dropped = append(dropped, c.Settings.Indexes[i])
 		c.Settings.Indexes = slices.Delete(c.Settings.Indexes, i, i+1)
+	}
+
+	// A side table nothing indexes any more would only slow every write.
+	if err := dropUnusedMultikey(ctx, db, c.TableName, dropped, c.Settings.Indexes); err != nil {
+		return lazyerrors.Error(err)
 	}
 
 	q := fmt.Sprintf("UPDATE %q SET settings = ? WHERE table_name = ?", metadataTableName)

@@ -16,6 +16,7 @@ package metadata
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -31,6 +32,102 @@ import (
 	"github.com/FerretDB/FerretDB/internal/util/testutil"
 	"github.com/FerretDB/FerretDB/internal/util/testutil/teststress"
 )
+
+func mustCollectionGet(t *testing.T, ctx context.Context, r *Registry, dbName, collectionName string) *Collection {
+	t.Helper()
+	c, err := r.CollectionGet(ctx, dbName, collectionName)
+	require.NoError(t, err)
+	return c
+}
+
+func TestDiscoverCommittedDatabaseFiles(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Ctx(t)
+	sp, err := state.NewProvider("")
+	require.NoError(t, err)
+	uri := testutil.TestSQLiteURI(t, "")
+	r, err := NewRegistry(uri, 100, testutil.Logger(t), sp)
+	require.NoError(t, err)
+	t.Cleanup(r.Close)
+
+	require.Nil(t, r.DatabaseGetExisting(ctx, "external"))
+	require.Empty(t, r.DatabaseList(ctx))
+	openExternal := func(name string) *sql.DB {
+		t.Helper()
+		db, err := sql.Open("sqlite", filepath.Join(strings.TrimPrefix(uri, "file:"), name+".sqlite"))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, db.Close()) })
+		return db
+	}
+	external := openExternal("external")
+	_, err = external.ExecContext(ctx, "CREATE TABLE outside_table (id INTEGER)")
+	require.NoError(t, err)
+	require.Nil(t, r.DatabaseGetExisting(ctx, "external"))
+	require.Empty(t, r.DatabaseList(ctx))
+	_, err = r.DatabaseGetOrCreate(ctx, "external")
+	require.ErrorContains(t, err, "not a registered database")
+	var count int
+	require.NoError(t, external.QueryRowContext(ctx, "SELECT count(*) FROM outside_table").Scan(&count))
+
+	_, err = external.ExecContext(ctx, fmt.Sprintf("CREATE TABLE %q (name TEXT, table_name TEXT, settings TEXT)", metadataTableName))
+	require.NoError(t, err)
+	require.Equal(t, []string{"external"}, r.DatabaseList(ctx))
+	require.NotNil(t, r.DatabaseGetExisting(ctx, "external"))
+	_, err = r.DatabaseGetOrCreate(ctx, "external")
+	require.NoError(t, err)
+	require.NoError(t, external.QueryRowContext(ctx, "SELECT count(*) FROM outside_table").Scan(&count))
+}
+
+func TestDiscoverCommittedCollections(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Ctx(t)
+	sp, err := state.NewProvider("")
+	require.NoError(t, err)
+	r, err := NewRegistry(testutil.TestSQLiteURI(t, ""), 100, testutil.Logger(t), sp)
+	require.NoError(t, err)
+	t.Cleanup(r.Close)
+
+	dbName := testutil.DatabaseName(t)
+	db, err := r.DatabaseGetOrCreate(ctx, dbName)
+	require.NoError(t, err)
+	require.Nil(t, mustCollectionGet(t, ctx, r, dbName, "external_lookup"))
+
+	register := func(name string) {
+		t.Helper()
+		physical := name + "_table"
+		_, err = db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE %q (%s BLOB NOT NULL) STRICT", physical, DefaultColumn))
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %q (name, table_name, settings) VALUES (?, ?, ?)", metadataTableName),
+			name, physical, `{"storage":"jsonb"}`)
+		require.NoError(t, err)
+	}
+	register("external_lookup")
+	lookup := mustCollectionGet(t, ctx, r, dbName, "external_lookup")
+	require.NotNil(t, lookup)
+	require.Equal(t, "external_lookup_table", lookup.TableName)
+	require.True(t, lookup.JSONB())
+	lookup.TableName = "changed"
+	require.Equal(t, "external_lookup_table", mustCollectionGet(t, ctx, r, dbName, "external_lookup").TableName)
+
+	register("external_list")
+	register("external_create")
+	created, err := r.CollectionCreate(ctx, &CollectionCreateParams{DBName: dbName, Name: "external_create"})
+	require.NoError(t, err)
+	require.False(t, created)
+	register("external_list_late")
+	_, err = db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %q (name, table_name, settings) VALUES (?, ?, ?)", metadataTableName),
+		"missing_table", "absent", "{}")
+	require.NoError(t, err)
+	require.Nil(t, mustCollectionGet(t, ctx, r, dbName, "missing_table"))
+
+	colls, err := r.CollectionList(ctx, dbName)
+	require.NoError(t, err)
+	require.Len(t, colls, 4)
+	require.Equal(t, "external_create", colls[0].Name)
+	require.Equal(t, "external_list", colls[1].Name)
+	require.Equal(t, "external_list_late", colls[2].Name)
+	require.Equal(t, "external_lookup", colls[3].Name)
+}
 
 func TestIndexUpgradeProgressFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "progress", "index-migration.json")
@@ -60,7 +157,7 @@ func TestIndexUpgradeProgressFile(t *testing.T) {
 func testCollection(t *testing.T, ctx context.Context, r *Registry, db *fsql.DB, dbName, collectionName string) {
 	t.Helper()
 
-	c := r.CollectionGet(ctx, dbName, collectionName)
+	c := mustCollectionGet(t, ctx, r, dbName, collectionName)
 	require.Nil(t, c)
 
 	created, err := r.CollectionCreate(ctx, &CollectionCreateParams{DBName: dbName, Name: collectionName})
@@ -71,7 +168,7 @@ func testCollection(t *testing.T, ctx context.Context, r *Registry, db *fsql.DB,
 	require.NoError(t, err)
 	require.False(t, created)
 
-	c = r.CollectionGet(ctx, dbName, collectionName)
+	c = mustCollectionGet(t, ctx, r, dbName, collectionName)
 	require.NotNil(t, c)
 	require.Equal(t, collectionName, c.Name)
 
@@ -79,7 +176,7 @@ func testCollection(t *testing.T, ctx context.Context, r *Registry, db *fsql.DB,
 	require.NoError(t, err)
 	require.Contains(t, list, c)
 
-	q := fmt.Sprintf("INSERT INTO %q (%s) VALUES(?)", c.TableName, DefaultColumn)
+	q := fmt.Sprintf("INSERT INTO %q (%s) VALUES(jsonb(?))", c.TableName, DefaultColumn) // collections are JSONB (storage.go)
 	doc := `{"$s": {"p": {"_id": {"t": "int"}}, "$k": ["_id"]}, "_id": 42}`
 	_, err = db.ExecContext(ctx, q, doc)
 	require.NoError(t, err)
@@ -92,7 +189,7 @@ func testCollection(t *testing.T, ctx context.Context, r *Registry, db *fsql.DB,
 	require.NoError(t, err)
 	require.False(t, dropped)
 
-	c = r.CollectionGet(ctx, dbName, collectionName)
+	c = mustCollectionGet(t, ctx, r, dbName, collectionName)
 	require.Nil(t, c)
 }
 
@@ -115,7 +212,7 @@ func TestCreateDrop(t *testing.T) {
 
 	state := sp.Get()
 	require.Equal(t, "SQLite", state.BackendName)
-	require.Equal(t, "3.53.3", state.BackendVersion)
+	require.Equal(t, "3.54.1", state.BackendVersion)
 
 	collectionName := testutil.CollectionName(t)
 
@@ -153,7 +250,7 @@ func TestCollectionCreateAdoptsOrphanTable(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
-	c := r.CollectionGet(ctx, dbName, collectionName)
+	c := mustCollectionGet(t, ctx, r, dbName, collectionName)
 	require.NotNil(t, c)
 	tableName := c.TableName
 
@@ -166,7 +263,7 @@ func TestCollectionCreateAdoptsOrphanTable(t *testing.T) {
 	delete(r.colls[dbName], collectionName)
 	r.rw.Unlock()
 
-	require.Nil(t, r.CollectionGet(ctx, dbName, collectionName), "collection must look absent after orphaning")
+	require.Nil(t, mustCollectionGet(t, ctx, r, dbName, collectionName), "collection must look absent after orphaning")
 
 	// Re-creating it (as an upsert's CreateCollection does) must SUCCEED by
 	// adopting the orphaned table, not error with "table already exists".
@@ -174,12 +271,12 @@ func TestCollectionCreateAdoptsOrphanTable(t *testing.T) {
 	require.NoError(t, err, "collectionCreate must adopt an orphaned physical table, not fail on it")
 	require.True(t, created)
 
-	c = r.CollectionGet(ctx, dbName, collectionName)
+	c = mustCollectionGet(t, ctx, r, dbName, collectionName)
 	require.NotNil(t, c, "collection must be registered again")
 	require.Equal(t, tableName, c.TableName, "must re-adopt the SAME deterministic table")
 
 	// And the adopted collection must be usable (insert + read back).
-	_, err = db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %q (%s) VALUES (?)", tableName, DefaultColumn), `{"_id":"x"}`)
+	_, err = db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %q (%s) VALUES (jsonb(?))", tableName, DefaultColumn), `{"_id":"x"}`)
 	require.NoError(t, err)
 }
 
@@ -208,7 +305,7 @@ func TestOplogTsIndexUsedForTailRange(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
-	c := r.CollectionGet(ctx, "local", "oplog.rs")
+	c := mustCollectionGet(t, ctx, r, "local", "oplog.rs")
 	require.NotNil(t, c)
 	tableName := c.TableName
 	indexName := tableName + "_ts"
@@ -278,7 +375,7 @@ func TestInWithNullUsesIndex(t *testing.T) {
 		Key:  []IndexKeyPair{{Field: "boardId"}},
 	}}))
 
-	c := r.CollectionGet(ctx, dbName, collectionName)
+	c := mustCollectionGet(t, ctx, r, dbName, collectionName)
 	require.NotNil(t, c)
 	tableName := c.TableName
 
@@ -338,7 +435,7 @@ func TestDottedPathEqualityUsesIndex(t *testing.T) {
 		Key:  []IndexKeyPair{{Field: "meta.cardId"}},
 	}}))
 
-	c := r.CollectionGet(ctx, dbName, collectionName)
+	c := mustCollectionGet(t, ctx, r, dbName, collectionName)
 	require.NotNil(t, c)
 	tableName := c.TableName
 
@@ -466,7 +563,7 @@ func TestCreateSameStress(t *testing.T) {
 				require.NoError(t, err)
 				require.False(t, created)
 
-				c := r.CollectionGet(ctx, dbName, collectionName)
+				c := mustCollectionGet(t, ctx, r, dbName, collectionName)
 				require.NotNil(t, c)
 				require.Equal(t, collectionName, c.Name)
 
@@ -474,7 +571,7 @@ func TestCreateSameStress(t *testing.T) {
 				require.NoError(t, err)
 				require.Contains(t, list, c)
 
-				q := fmt.Sprintf("INSERT INTO %q (%s) VALUES(?)", c.TableName, DefaultColumn)
+				q := fmt.Sprintf("INSERT INTO %q (%s) VALUES(jsonb(?))", c.TableName, DefaultColumn) // collections are JSONB (storage.go)
 				doc := fmt.Sprintf(`{"$s": {"p": {"_id": {"t": "int"}}, "$k": ["_id"]}, "_id": %d}`, id)
 				_, err = db.ExecContext(ctx, q, doc)
 				require.NoError(t, err)
@@ -655,7 +752,7 @@ func TestIndexesCreateDrop(t *testing.T) {
 	err = r.IndexesCreate(ctx, dbName, collectionName, toCreate)
 	require.NoError(t, err)
 
-	collection := r.CollectionGet(ctx, dbName, collectionName)
+	collection := mustCollectionGet(t, ctx, r, dbName, collectionName)
 
 	t.Run("CoveringDistinctIndex", func(t *testing.T) {
 		indexName := collection.TableName + "_covering_index"
@@ -766,7 +863,7 @@ func TestIndexesCreateDrop(t *testing.T) {
 		err = r.initCollections(ctx, dbName, db)
 		require.NoError(t, err)
 
-		collection = r.CollectionGet(ctx, dbName, collectionName)
+		collection = mustCollectionGet(t, ctx, r, dbName, collectionName)
 		require.Equal(t, 5, len(collection.Settings.Indexes))
 	})
 
@@ -787,7 +884,71 @@ func TestIndexesCreateDrop(t *testing.T) {
 		err = r.initCollections(ctx, dbName, db)
 		require.NoError(t, err)
 
-		collection = r.CollectionGet(ctx, dbName, collectionName)
+		collection = mustCollectionGet(t, ctx, r, dbName, collectionName)
 		require.Equal(t, 1, len(collection.Settings.Indexes))
 	})
+}
+
+// CollectionList and DatabaseDrop racing, as integration's
+// TestCommandsAdministrationServerStatusStress does through serverStatus: a
+// list must never query a connection the drop has closed.
+func TestCollectionListDropStress(t *testing.T) {
+	ctx := testutil.Ctx(t)
+
+	sp, err := state.NewProvider("")
+	require.NoError(t, err)
+
+	r, err := NewRegistry(testutil.TestSQLiteURI(t, ""), 100, testutil.Logger(t), sp)
+	require.NoError(t, err)
+	t.Cleanup(r.Close)
+
+	var i atomic.Int32
+
+	teststress.StressN(t, 40, func(ready chan<- struct{}, start <-chan struct{}) {
+		n := i.Add(1)
+		dbName := fmt.Sprintf("db_%03d", n)
+
+		ready <- struct{}{}
+		<-start
+
+		for round := 0; round < 20; round++ {
+			_, err := r.CollectionCreate(ctx, &CollectionCreateParams{DBName: dbName, Name: "c"})
+			require.NoError(t, err)
+
+			for _, name := range r.DatabaseList(ctx) {
+				_, err = r.CollectionList(ctx, name)
+				require.NoError(t, err, "CollectionList(%s)", name)
+
+				_, err = r.CollectionRename(ctx, name, "absent", "renamed")
+				require.NoError(t, err, "CollectionRename(%s)", name)
+			}
+
+			r.DatabaseDrop(ctx, dbName)
+		}
+	})
+}
+
+// Negative, by the shape: no Registry method that takes the lock may fetch the
+// database connection before it, where a concurrent DatabaseDrop can close it.
+func TestRegistryTakesConnectionUnderLock(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("registry.go")
+	require.NoError(t, err)
+
+	funcs := strings.Split(string(src), "\nfunc ")
+	for _, f := range funcs[1:] {
+		name := f[:strings.Index(f, "(ctx")+1]
+		if end := strings.Index(f, "\n}\n"); end > 0 {
+			f = f[:end]
+		}
+
+		lock := strings.Index(f, "r.rw.Lock()")
+		get := strings.Index(f, "r.DatabaseGetExisting(")
+		if lock < 0 || get < 0 {
+			continue
+		}
+
+		require.Less(t, lock, get, "%s fetches the connection before taking the lock", name)
+	}
 }

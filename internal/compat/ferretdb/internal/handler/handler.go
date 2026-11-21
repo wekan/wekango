@@ -105,8 +105,15 @@ type NewOpts struct {
 	StateProvider *state.Provider
 
 	// test options
-	DisablePushdown         bool
-	EnableNestedPushdown    bool
+	DisablePushdown      bool
+	EnableNestedPushdown bool
+
+	// NestedPushdownSuperset is set by a backend whose pushdown of a dotted
+	// path ("a.b") is a superset of what MongoDB matches - it keeps the rows
+	// where the path does not resolve to a single value (an array on the way,
+	// a missing field) - so dotted filter keys can be passed to it safely.
+	// Without it they are removed and filtered in Go only.
+	NestedPushdownSuperset  bool
 	CappedCleanupInterval   time.Duration
 	CappedCleanupPercentage uint8
 	TTLCleanupInterval      time.Duration
@@ -809,6 +816,41 @@ func getDocCleanupCount(cInfo *backends.CollectionInfo, cStats *backends.Collect
 	}
 
 	return (cStats.CountDocuments - cInfo.CappedDocuments)
+}
+
+// trimCappedByCount keeps a capped collection created with `max` at that many
+// documents right after an insert, by deleting the oldest, as MongoDB does: a
+// read straight after the insert sees only the newest `max`. The periodic
+// cleanup (runCappedCleanup) still trims by SIZE, which MongoDB also does at
+// once but which needs the size estimate the cleanup computes. A failure here
+// is logged and never fails the insert that has already succeeded.
+func (h *Handler) trimCappedByCount(ctx context.Context, db backends.Database, name string) {
+	list, err := db.ListCollections(ctx, &backends.ListCollectionsParams{Name: name})
+	if err != nil || len(list.Collections) != 1 {
+		return
+	}
+
+	cInfo := list.Collections[0]
+	if !cInfo.Capped() || cInfo.CappedDocuments <= 0 {
+		return
+	}
+
+	coll, err := db.Collection(name)
+	if err != nil {
+		return
+	}
+
+	stats, err := coll.Stats(ctx, &backends.CollectionStatsParams{Refresh: true})
+	if err != nil {
+		h.L.WarnContext(ctx, "trimCappedByCount: stats failed", logging.Error(err))
+		return
+	}
+
+	if count := getDocCleanupCount(&cInfo, stats); count > 0 {
+		if err = deleteFirstNDocuments(ctx, coll, count); err != nil {
+			h.L.WarnContext(ctx, "trimCappedByCount: delete failed", logging.Error(err))
+		}
+	}
 }
 
 // getSizeCleanupCount returns the number of documents to be deleted during capped collection cleanup

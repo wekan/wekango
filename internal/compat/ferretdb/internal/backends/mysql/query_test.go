@@ -137,24 +137,53 @@ func TestPrepareWhereClause(t *testing.T) {
 
 		// Numeric / date / Timestamp range pushdown, guarded by JSON_TYPE so a
 		// non-number value can never mis-compare.
-		"RangeTimestampNotPushed": {
-			// {ts: {$gt: <Timestamp>}} — the OpLog tail shape. NOT pushed down on this
-			// backend: a live MySQL 9.7 answered a date range with no rows at all,
-			// and a pushdown that is too narrow is silently wrong, so the two
-			// temporal types are left to the Go filter until the expression MySQL
-			// needs for them is confirmed against a live server.
+		"RangeTimestampGt": {
+			// {ts: {$gt: <Timestamp>}} - the OpLog tail shape. Compared only in
+			// DECIMAL form, with the LITERAL '$.ts' path that the capped-collection
+			// index is built on, and non-strictly: a superset the Go filter narrows.
 			filter: must.NotFail(types.NewDocument("ts",
 				must.NotFail(types.NewDocument("$gt", types.Timestamp(7300000000000000000))))),
+			expected: ` WHERE JSON_TYPE(JSON_EXTRACT(_ferretdb_sjson, '$.ts')) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') ` +
+				`AND CAST(JSON_UNQUOTE(JSON_EXTRACT(_ferretdb_sjson, '$.ts')) AS DECIMAL(65,10)) >= CAST(? AS DECIMAL(65,10))`,
+			args: []any{int64(7300000000000000000)},
 		},
-		"RangeDateNotPushed": {
+		"RangeTimestampAboveInt64NotPushed": {
+			filter: must.NotFail(types.NewDocument("ts",
+				must.NotFail(types.NewDocument("$gt", types.Timestamp(math.MaxUint64))))),
+		},
+		"RangeDateGte": {
+			// Dates use the same DECIMAL form on their UnixMilli value; the path of
+			// any key other than ts stays a bound parameter.
 			filter: must.NotFail(types.NewDocument("when",
 				must.NotFail(types.NewDocument("$gte",
 					time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))))),
+			expected: ` WHERE JSON_TYPE(JSON_EXTRACT(_ferretdb_sjson, ?)) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') ` +
+				`AND CAST(JSON_UNQUOTE(JSON_EXTRACT(_ferretdb_sjson, ?)) AS DECIMAL(65,10)) >= CAST(? AS DECIMAL(65,10))`,
+			args: []any{`$."when"`, `$."when"`, int64(1577836800000)},
+		},
+		"RangeDateLtIsNonStrict": {
+			filter: must.NotFail(types.NewDocument("when",
+				must.NotFail(types.NewDocument("$lt",
+					time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))))),
+			expected: ` WHERE JSON_TYPE(JSON_EXTRACT(_ferretdb_sjson, ?)) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') ` +
+				`AND CAST(JSON_UNQUOTE(JSON_EXTRACT(_ferretdb_sjson, ?)) AS DECIMAL(65,10)) <= CAST(? AS DECIMAL(65,10))`,
+			args: []any{`$."when"`, `$."when"`, int64(1577836800000)},
+		},
+		"RangeNumberOnTsAddsIndexableForm": {
+			// A number bound on ts keeps the exact comparison and gains the
+			// indexable DECIMAL form beside it.
+			filter: must.NotFail(types.NewDocument("ts",
+				must.NotFail(types.NewDocument("$lt", int64(42))))),
+			expected: ` WHERE JSON_TYPE(JSON_EXTRACT(_ferretdb_sjson, ?)) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') ` +
+				`AND JSON_EXTRACT(_ferretdb_sjson, ?) < ? AND ` +
+				`JSON_TYPE(JSON_EXTRACT(_ferretdb_sjson, '$.ts')) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') ` +
+				`AND CAST(JSON_UNQUOTE(JSON_EXTRACT(_ferretdb_sjson, '$.ts')) AS DECIMAL(65,10)) <= CAST(? AS DECIMAL(65,10))`,
+			args: []any{`$."ts"`, `$."ts"`, int64(42), int64(42)},
 		},
 		"RangeNumberLte": {
 			filter: must.NotFail(types.NewDocument("count",
 				must.NotFail(types.NewDocument("$lte", int64(100))))),
-			expected: ` WHERE JSON_TYPE(JSON_EXTRACT(_ferretdb_sjson, ?)) IN ('INTEGER', 'DOUBLE', 'DECIMAL') ` +
+			expected: ` WHERE JSON_TYPE(JSON_EXTRACT(_ferretdb_sjson, ?)) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE', 'DECIMAL') ` +
 				`AND JSON_EXTRACT(_ferretdb_sjson, ?) <= ?`,
 			args: []any{`$."count"`, `$."count"`, int64(100)},
 		},
@@ -164,13 +193,14 @@ func TestPrepareWhereClause(t *testing.T) {
 				must.NotFail(types.NewDocument("$gt", "abc")))),
 		},
 
-		// $in pushdown: an OR of JSON_CONTAINS arms, plus a null-or-missing arm.
+		// $in pushdown: one JSON_OVERLAPS of the field and the list (not a
+		// JSON_CONTAINS per value, which made each row evaluate every one), plus a
+		// null-or-missing arm.
 		"InPushed": {
 			filter: must.NotFail(types.NewDocument("labelIds",
 				must.NotFail(types.NewDocument("$in", must.NotFail(types.NewArray("a", "b")))))),
-			expected: ` WHERE (JSON_CONTAINS(JSON_EXTRACT(_ferretdb_sjson, ?), JSON_EXTRACT(?, '$'), '$') ` +
-				`OR JSON_CONTAINS(JSON_EXTRACT(_ferretdb_sjson, ?), JSON_EXTRACT(?, '$'), '$'))`,
-			args: []any{`$."labelIds"`, `"a"`, `$."labelIds"`, `"b"`},
+			expected: ` WHERE (JSON_OVERLAPS(JSON_EXTRACT(_ferretdb_sjson, ?), JSON_EXTRACT(?, '$')))`,
+			args:     []any{`$."labelIds"`, `["a","b"]`},
 		},
 		"InWithNullPushed": {
 			filter: must.NotFail(types.NewDocument("boardId",

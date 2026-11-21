@@ -226,13 +226,15 @@ func TestPrepareWhereClause(t *testing.T) {
 	arrayArm := func(field string) string {
 		return fmt.Sprintf(`(%[1]s = ? OR (%[1]s >= '[' AND %[1]s < '\'))`, expr(field))
 	}
+	// The array is read from the column by path, not as the text of ->, which would
+	// render the whole array as JSON text for json_each to parse again.
 	elemMatch := func(field string, conditions ...string) string {
-		fieldExpr := expr(field)
+		arrayArgs := fmt.Sprintf(`%s, '$."%s"'`, metadata.DefaultColumn, field)
 		return fmt.Sprintf(
 			`(json_type(%[1]s) = 'array' AND EXISTS (`+
 				`SELECT 1 FROM json_each(%[1]s) AS element `+
-				`WHERE json_type(element.value) = 'object' AND %s))`,
-			fieldExpr,
+				`WHERE element.type = 'object' AND %s))`,
+			arrayArgs,
 			strings.Join(conditions, " AND "),
 		)
 	}
@@ -449,8 +451,8 @@ func TestPrepareWhereClause(t *testing.T) {
 				"$elemMatch", must.NotFail(types.NewDocument("userId", "u1", "isActive", true)),
 			)))),
 			expectWhere: ` WHERE ` + elemMatch("members",
-				`(element.value->"userId" = ? OR (element.value->"userId" >= '[' AND element.value->"userId" < '\'))`,
-				`(element.value->"isActive" = ? OR (element.value->"isActive" >= '[' AND element.value->"isActive" < '\'))`,
+				`((CASE WHEN element.type = 'object' THEN element.value->'userId' END) = ? OR ((CASE WHEN element.type = 'object' THEN element.value->'userId' END) >= '[' AND (CASE WHEN element.type = 'object' THEN element.value->'userId' END) < '\'))`,
+				`((CASE WHEN element.type = 'object' THEN element.value->'isActive' END) = ? OR ((CASE WHEN element.type = 'object' THEN element.value->'isActive' END) >= '[' AND (CASE WHEN element.type = 'object' THEN element.value->'isActive' END) < '\'))`,
 			),
 			expectArgs: []any{`"u1"`, `true`},
 		},
@@ -462,8 +464,8 @@ func TestPrepareWhereClause(t *testing.T) {
 				)),
 			)))),
 			expectWhere: ` WHERE ` + elemMatch("teams",
-				`(element.value->"teamId" IN (?, ?) OR (element.value->"teamId" >= '[' AND element.value->"teamId" < '\'))`,
-				`(element.value->"isActive" = ? OR (element.value->"isActive" >= '[' AND element.value->"isActive" < '\'))`,
+				`((CASE WHEN element.type = 'object' THEN element.value->'teamId' END) IN (?, ?) OR ((CASE WHEN element.type = 'object' THEN element.value->'teamId' END) >= '[' AND (CASE WHEN element.type = 'object' THEN element.value->'teamId' END) < '\'))`,
+				`((CASE WHEN element.type = 'object' THEN element.value->'isActive' END) = ? OR ((CASE WHEN element.type = 'object' THEN element.value->'isActive' END) >= '[' AND (CASE WHEN element.type = 'object' THEN element.value->'isActive' END) < '\'))`,
 			),
 			expectArgs: []any{`"t1"`, `"t2"`, `true`},
 		},
@@ -526,9 +528,12 @@ func TestPrepareWhereClause(t *testing.T) {
 			// {'meta.cardId': 'C'} — a Meteor-Files attachment lookup. Pushes down as
 			// the NESTED expression that matches the meta.cardId expression index, so
 			// the attachments collection is no longer full-scanned on every poll.
+			// The IS NULL arm keeps a row whose path runs through an array
+			// ({meta: [{cardId: 'C'}]}), where the -> chain yields NULL but
+			// MongoDB still matches.
 			filter: must.NotFail(types.NewDocument("meta.cardId", "C")),
 			expectWhere: ` WHERE ` + fmt.Sprintf(
-				`(%[1]s = ? OR (%[1]s >= '[' AND %[1]s < '\'))`,
+				`((%[1]s = ? OR (%[1]s >= '[' AND %[1]s < '\')) OR %[1]s IS NULL)`,
 				metadata.DefaultColumn+`->"meta"->"cardId"`),
 			expectArgs: []any{`"C"`},
 		},
@@ -536,9 +541,15 @@ func TestPrepareWhereClause(t *testing.T) {
 			filter: must.NotFail(types.NewDocument("meta.cardId",
 				must.NotFail(types.NewDocument("$in", must.NotFail(types.NewArray("a", "b")))))),
 			expectWhere: ` WHERE ` + fmt.Sprintf(
-				`(%[1]s IN (?, ?) OR (%[1]s >= '[' AND %[1]s < '\'))`,
+				`((%[1]s IN (?, ?) OR (%[1]s >= '[' AND %[1]s < '\')) OR %[1]s IS NULL)`,
 				metadata.DefaultColumn+`->"meta"->"cardId"`),
 			expectArgs: []any{`"a"`, `"b"`},
+		},
+		"DottedPathEmptyInMatchesNothing": {
+			// An empty $in matches nothing, through an array or not: no IS NULL arm.
+			filter: must.NotFail(types.NewDocument("meta.cardId",
+				must.NotFail(types.NewDocument("$in", must.NotFail(types.NewArray()))))),
+			expectWhere: ` WHERE 0`,
 		},
 		"DottedPathRangeNotPushed": {
 			// a range on a dotted path would need a scalar ->> on the raw key, which
@@ -685,4 +696,38 @@ func TestPrepareOrderByClause(t *testing.T) {
 			assert.Equal(t, tc.orderBy, orderBy)
 		})
 	}
+}
+
+// A field every branch of an $or constrains narrows every match, so it picks the
+// index too: {$and: [{$or: [{boardId: {$in: A}}, {boardId: {$in: B}, assignees:
+// u}]}], type: ...} is a boardId lookup, and was answered from the far less
+// selective {type: 1} index - every row of that type read.
+func TestPreferredCompoundIndexOr(t *testing.T) {
+	t.Parallel()
+
+	indexes := []metadata.IndexInfo{
+		{Name: "boardId_1_archived_1_type_1_dueAt_1", Key: []metadata.IndexKeyPair{
+			{Field: "boardId"}, {Field: "archived"}, {Field: "type"}, {Field: "dueAt"},
+		}},
+		{Name: "type_1", Key: []metadata.IndexKeyPair{{Field: "type"}}},
+	}
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	arr := func(values ...any) *types.Array { return must.NotFail(types.NewArray(values...)) }
+
+	common := doc(
+		"type", "cardType-card", "archived", false,
+		"$and", arr(doc("$or", arr(
+			doc("boardId", doc("$in", arr("b1", "b2"))),
+			doc("boardId", doc("$in", arr()), "assignees", "u1"),
+		))),
+	)
+	assert.Equal(t, "cards_boardId_1_archived_1_type_1_dueAt_1", preferredCompoundIndex("cards", indexes, common))
+
+	// Negative: a field only SOME branches constrain does not narrow the others'
+	// matches, and is not counted.
+	partial := doc(
+		"type", "cardType-card", "archived", false,
+		"$or", arr(doc("boardId", "b1"), doc("assignees", "u1")),
+	)
+	assert.Equal(t, "cards_type_1", preferredCompoundIndex("cards", indexes, partial))
 }

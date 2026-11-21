@@ -39,8 +39,8 @@ import (
 	"github.com/FerretDB/FerretDB/internal/util/state"
 )
 
-// filenameExtension represents SQLite database filename extension.
-const filenameExtension = ".sqlite"
+// defaultFilenameExtension is the historical SQLite database extension.
+const defaultFilenameExtension = ".sqlite"
 
 // Parts of Prometheus metric names.
 const (
@@ -52,9 +52,11 @@ const (
 //
 //nolint:vet // for readability
 type Pool struct {
-	uri url.URL
-	l   *slog.Logger
-	sp  *state.Provider
+	uri        url.URL
+	ext        string
+	shortNames bool
+	l          *slog.Logger
+	sp         *state.Provider
 
 	rw  sync.RWMutex
 	dbs map[string]*fsql.DB
@@ -74,12 +76,27 @@ func New(u string, l *slog.Logger, sp *state.Provider) (*Pool, map[string]*fsql.
 		return nil, nil, fmt.Errorf("failed to parse SQLite URI %q: %s", u, err)
 	}
 
+	extension := defaultFilenameExtension
+	values := uri.Query()
+	if values.Get("dbext") == "db" {
+		extension = ".db"
+	}
+	shortNames := values.Get("shortnames") == "1"
+	values.Del("dbext")
+	values.Del("shortnames")
+	if err := checkShortSidecarBuild(shortNames); err != nil {
+		return nil, nil, err
+	}
+	uri.RawQuery = values.Encode()
+
 	p := &Pool{
-		uri:   *uri,
-		l:     l,
-		sp:    sp,
-		dbs:   map[string]*fsql.DB{},
-		token: resource.NewToken(),
+		uri:        *uri,
+		ext:        extension,
+		shortNames: shortNames,
+		l:          l,
+		sp:         sp,
+		dbs:        map[string]*fsql.DB{},
+		token:      resource.NewToken(),
 	}
 
 	resource.Track(p, p.token)
@@ -88,7 +105,7 @@ func New(u string, l *slog.Logger, sp *state.Provider) (*Pool, map[string]*fsql.
 		return p, p.dbs, nil
 	}
 
-	matches, err := filepath.Glob(filepath.Join(uri.Path, "*"+filenameExtension))
+	matches, err := filepath.Glob(filepath.Join(uri.Path, "*"+p.ext))
 	if err != nil {
 		p.Close()
 		return nil, nil, lazyerrors.Error(err)
@@ -96,11 +113,15 @@ func New(u string, l *slog.Logger, sp *state.Provider) (*Pool, map[string]*fsql.
 
 	for _, f := range matches {
 		name := p.databaseName(f)
+		if err := p.checkAlternateFiles(name); err != nil {
+			p.Close()
+			return nil, nil, err
+		}
 		uri := p.databaseURI(name)
 
 		p.l.Debug("Opening existing database", slog.String("name", name), slog.String("uri", uri))
 
-		db, err := openDB(name, uri, p.memory(), l, p.sp)
+		db, err := openDB(name, uri, p.memory(), true, p.shortNames, l, p.sp)
 		if err != nil {
 			p.Close()
 			return nil, nil, lazyerrors.Error(err)
@@ -123,14 +144,14 @@ func (p *Pool) databaseName(databaseFile string) string {
 		panic("should not be called for in-memory database")
 	}
 
-	return strings.TrimSuffix(filepath.Base(databaseFile), filenameExtension)
+	return strings.TrimSuffix(filepath.Base(databaseFile), p.ext)
 }
 
 // databaseURI returns SQLite URI for the given database name,
 // even for in-memory database.
 func (p *Pool) databaseURI(databaseName string) string {
 	dbURI := p.uri
-	dbURI.Path = path.Join(dbURI.Path, databaseName+filenameExtension)
+	dbURI.Path = path.Join(dbURI.Path, databaseName+p.ext)
 	dbURI.Opaque = dbURI.Path
 
 	return dbURI.String()
@@ -143,7 +164,51 @@ func (p *Pool) databaseFile(databaseName string) string {
 		return ""
 	}
 
-	return filepath.Join(p.uri.Path, databaseName+filenameExtension)
+	return filepath.Join(p.uri.Path, databaseName+p.ext)
+}
+
+// checkAlternateFiles prevents two extension modes from opening different
+// databases for the same name, including recovery files left by either mode.
+func (p *Pool) checkAlternateFiles(name string) error {
+	if p.memory() {
+		return nil
+	}
+	alternate := ".db"
+	if p.ext == alternate {
+		alternate = defaultFilenameExtension
+	}
+	base := filepath.Join(p.uri.Path, name)
+	suffixes := []string{alternate, alternate + "-wal", alternate + "-shm", alternate + "-journal"}
+	if p.shortNames {
+		if !shortDatabaseName(name) {
+			return fmt.Errorf("SQLite database name %q is not an 8.3 filename stem", name)
+		}
+		suffixes = append(suffixes, ".db-wal", ".db-shm", ".db-journal")
+	} else {
+		suffixes = append(suffixes, ".wal", ".shm", ".nal")
+	}
+	for _, suffix := range suffixes {
+		_, err := os.Lstat(base + suffix)
+		if err == nil {
+			return fmt.Errorf("conflicting SQLite database path %q", base+suffix)
+		}
+		if !os.IsNotExist(err) {
+			return lazyerrors.Error(err)
+		}
+	}
+	return nil
+}
+
+func shortDatabaseName(name string) bool {
+	if len(name) == 0 || len(name) > 8 {
+		return false
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // Close closes all databases in the pool and frees all resources.
@@ -179,10 +244,70 @@ func (p *Pool) GetExisting(ctx context.Context, name string) *fsql.DB {
 	return p.dbs[name]
 }
 
+// Discover opens a database file committed by another process. The callback
+// must verify registration before the connection is published to the pool.
+func (p *Pool) Discover(ctx context.Context, name string, registered func(*fsql.DB) bool) *fsql.DB {
+	if p.memory() || name == "" || filepath.Base(name) != name {
+		return nil
+	}
+	info, err := os.Lstat(p.databaseFile(name))
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+
+	p.rw.Lock()
+	defer p.rw.Unlock()
+	if db := p.dbs[name]; db != nil {
+		return db
+	}
+
+	if err := p.checkAlternateFiles(name); err != nil {
+		p.l.DebugContext(ctx, "Skipped conflicting database path", logging.Error(err))
+		return nil
+	}
+
+	uri, err := url.Parse(p.databaseURI(name))
+	if err != nil {
+		return nil
+	}
+	query := uri.Query()
+	query.Set("mode", "rw")
+	uri.RawQuery = query.Encode()
+	db, err := openDB(name, uri.String(), false, false, p.shortNames, p.l, p.sp)
+	if err != nil {
+		p.l.DebugContext(ctx, "Failed to open external database", logging.Error(err))
+		return nil
+	}
+	if !registered(db) {
+		_ = db.Close()
+		return nil
+	}
+	p.dbs[name] = db
+	return db
+}
+
+// FileNames returns candidate database names that may have appeared since startup.
+func (p *Pool) FileNames() []string {
+	if p.memory() {
+		return nil
+	}
+	entries, err := os.ReadDir(p.uri.Path)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), p.ext) {
+			names = append(names, p.databaseName(entry.Name()))
+		}
+	}
+	return names
+}
+
 // GetOrCreate returns an existing database by valid name, or creates a new one.
 //
 // Returned boolean value indicates whether the database was created.
-func (p *Pool) GetOrCreate(ctx context.Context, name string) (*fsql.DB, bool, error) {
+func (p *Pool) GetOrCreate(ctx context.Context, name string, initialize func(*fsql.DB) error) (*fsql.DB, bool, error) {
 	db := p.GetExisting(ctx, name)
 	if db != nil {
 		return db, false, nil
@@ -196,10 +321,29 @@ func (p *Pool) GetOrCreate(ctx context.Context, name string) (*fsql.DB, bool, er
 		return db, false, nil
 	}
 
+	if err := p.checkAlternateFiles(name); err != nil {
+		return nil, false, err
+	}
+	if file := p.databaseFile(name); file != "" {
+		info, err := os.Lstat(file)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, false, lazyerrors.Error(err)
+		}
+		if err == nil && !info.Mode().IsRegular() {
+			return nil, false, fmt.Errorf("SQLite database path %q is not a regular file", file)
+		}
+	}
+
 	uri := p.databaseURI(name)
-	db, err := openDB(name, uri, p.memory(), p.l, p.sp)
+	db, err := openDB(name, uri, p.memory(), false, p.shortNames, p.l, p.sp)
 	if err != nil {
 		return nil, false, lazyerrors.Errorf("%s: %w", uri, err)
+	}
+	if initialize != nil {
+		if err = initialize(db); err != nil {
+			_ = db.Close()
+			return nil, false, lazyerrors.Error(err)
+		}
 	}
 
 	p.l.DebugContext(ctx, "Database created", slog.String("name", name), slog.String("uri", uri))

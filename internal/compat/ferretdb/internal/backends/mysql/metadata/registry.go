@@ -81,6 +81,12 @@ type Registry struct {
 	// TODO https://github.com/FerretDB/FerretDB/issues/2755
 	rw    sync.RWMutex
 	colls map[string]map[string]*Collection // database name -> collection name -> collection
+
+	// multikey holds the names of the complete multikey side tables (multikey.go).
+	multikey map[string]struct{}
+
+	// textJSON is set for a server that keeps JSON as text (MariaDB); see TextJSON.
+	textJSON bool
 }
 
 // NewRegistry creates a registry for the MySQL databases with a given base URI.
@@ -144,6 +150,12 @@ func (r *Registry) getPool(ctx context.Context) (*fsql.DB, error) {
 	dbNames, err := r.initDBs(ctx, p)
 	if err != nil {
 		return nil, lazyerrors.Error(err)
+	}
+
+	// MariaDB answers VERSION() with "...-MariaDB...": its JSON is LONGTEXT.
+	var version string
+	if err = p.QueryRowContext(ctx, `SELECT VERSION()`).Scan(&version); err == nil {
+		r.textJSON = strings.Contains(strings.ToLower(version), "mariadb")
 	}
 
 	r.colls = make(map[string]map[string]*Collection, len(dbNames))
@@ -236,6 +248,10 @@ func (r *Registry) initCollections(ctx context.Context, dbName string, p *fsql.D
 	}
 
 	r.colls[dbName] = colls
+
+	for _, c := range colls {
+		r.ensureMultikey(ctx, p, dbName, c.TableName, c.Indexes)
+	}
 
 	return nil
 }
@@ -363,8 +379,8 @@ func (r *Registry) databaseGetOrCreate(ctx context.Context, p *fsql.DB, dbName s
 	// https://dev.mysql.com/doc/refman/5.7/en/create-table-secondary-indexes.html#json-column-indirect-index
 	q = fmt.Sprintf(
 		`ALTER TABLE %s.%s
-		 ADD COLUMN %s VARCHAR(255) GENERATED ALWAYS AS ((%s)) STORED,
-    	 ADD COLUMN %s VARCHAR(255) GENERATED ALWAYS AS ((%s)) STORED
+		 ADD COLUMN %s VARCHAR(255) GENERATED ALWAYS AS ((%s)) VIRTUAL,
+    	 ADD COLUMN %s VARCHAR(255) GENERATED ALWAYS AS ((%s)) VIRTUAL
 		`,
 		dbName, metadataTableName,
 		IDIndexColumn, IDColumn,
@@ -742,6 +758,11 @@ func (r *Registry) collectionDrop(ctx context.Context, p *fsql.DB, dbName, colle
 		return false, lazyerrors.Error(err)
 	}
 
+	// The table's triggers went with it; its side tables did not.
+	if err := r.dropMultikey(ctx, p, dbName, c.TableName, c.Indexes, nil); err != nil {
+		return false, lazyerrors.Error(err)
+	}
+
 	q = fmt.Sprintf(
 		`DELETE FROM %s.%s WHERE %s IN (?)`,
 		dbName, metadataTableName,
@@ -958,10 +979,19 @@ func (r *Registry) indexesCreate(ctx context.Context, p *fsql.DB, dbName, collec
 			// ensure that the column hasn't already been extracted
 			if !slices.Contains(allColumns, columnName) {
 				adds = append(adds, fmt.Sprintf(
-					`ADD COLUMN %s VARCHAR(255) GENERATED ALWAYS AS ((JSON_EXTRACT(%s, %s))) STORED`,
+					// utf8mb4_bin: the table's default collation is case- and
+					// accent-insensitive (utf8mb4_uca1400_ai_ci, utf8mb4_0900_ai_ci), and
+					// a unique index on such a column refused _id "A" beside "a" - a
+					// duplicate key error for two different MongoDB values.
+					// VIRTUAL: a STORED generated column is written into every row, so
+					// adding one rebuilt the whole table - 20 minutes on MySQL and 40 on
+					// MariaDB for a client's 44 indexes over 600,000 documents. A
+					// VIRTUAL column costs nothing to add; its index still stores the
+					// value, which is all the queries read.
+					`ADD COLUMN %s VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin GENERATED ALWAYS AS ((JSON_EXTRACT(%s, %s))) VIRTUAL`,
 					QuoteIdent(columnName),
 					DefaultColumn,
-					QuoteString("$."+key.Field),
+					QuoteString(IndexJSONPath(key.Field)),
 				))
 
 				// Within one createIndexes call the same field may appear twice; the
@@ -986,6 +1016,17 @@ func (r *Registry) indexesCreate(ctx context.Context, p *fsql.DB, dbName, collec
 			if _, err = p.ExecContext(ctx, q); err != nil {
 				return lazyerrors.Error(err)
 			}
+		}
+
+		// An index key is at most 3,072 bytes, and each VARCHAR(255) utf8mb4 column
+		// is 1,020 of them: a compound index of four or more fields was refused
+		// ("Specified key was too long"). A non-unique index then indexes a prefix
+		// of each value instead - an equality still finds every match through the
+		// prefix, and the query's own condition keeps only the exact ones. A unique
+		// index keeps whole values: on prefixes, two different values would be
+		// duplicates.
+		if !index.Unique {
+			columns = PrefixedKeyColumns(columns)
 		}
 
 		q = "CREATE "
@@ -1037,6 +1078,8 @@ func (r *Registry) indexesCreate(ctx context.Context, p *fsql.DB, dbName, collec
 
 	r.colls[dbName][collectionName] = c
 
+	r.ensureMultikey(ctx, p, dbName, c.TableName, c.Indexes)
+
 	return nil
 }
 
@@ -1073,6 +1116,8 @@ func (r *Registry) indexesDrop(ctx context.Context, p *fsql.DB, dbName, collecti
 		return nil
 	}
 
+	var dropped []IndexInfo
+
 	// find the collection in the list of collections
 	for _, name := range indexNames {
 		i := slices.IndexFunc(c.Indexes, func(i IndexInfo) bool { return name == i.Name })
@@ -1093,7 +1138,12 @@ func (r *Registry) indexesDrop(ctx context.Context, p *fsql.DB, dbName, collecti
 			return lazyerrors.Error(err)
 		}
 
+		dropped = append(dropped, c.Indexes[i])
 		c.Indexes = slices.Delete(c.Indexes, i, i+1)
+	}
+
+	if err := r.dropMultikey(ctx, p, dbName, c.TableName, dropped, c.Indexes); err != nil {
+		return lazyerrors.Error(err)
 	}
 
 	b, err := sjson.Marshal(c.marshal())
@@ -1166,3 +1216,60 @@ func (r *Registry) Collect(ch chan<- prometheus.Metric) {
 var (
 	_ prometheus.Collector = (*Registry)(nil)
 )
+
+// maxKeyBytes is InnoDB's largest index key, and keyColumnBytes what one
+// VARCHAR(255) utf8mb4 generated column takes of it.
+const (
+	maxKeyBytes    = 3072
+	keyColumnBytes = 255 * 4
+)
+
+// PrefixedKeyColumns returns the key columns of a non-unique index, each limited
+// to a prefix when the whole key would exceed maxKeyBytes. A column may carry
+// " DESC" after its quoted name.
+func PrefixedKeyColumns(columns []string) []string {
+	if len(columns)*keyColumnBytes <= maxKeyBytes {
+		return columns
+	}
+
+	chars := maxKeyBytes / 4 / len(columns)
+	res := make([]string, len(columns))
+
+	for i, c := range columns {
+		name, desc, _ := strings.Cut(c, " ")
+		res[i] = fmt.Sprintf("%s(%d)", name, chars)
+
+		if desc != "" {
+			res[i] += " " + desc
+		}
+	}
+
+	return res
+}
+
+// IndexJSONPath returns the MySQL JSON path of an index key's field path, every
+// member quoted. `$.` followed by the dotted path itself was refused for any
+// member that is not a plain identifier - "Invalid JSON path expression" for
+// `services.accounts-lockout.unlockTime` (a dash) and `profile.emailBuffer.0`
+// (a digit) - so those indexes were never created at all. A quote or a
+// backslash inside a member is escaped, so it cannot end the member early.
+func IndexJSONPath(field string) string {
+	escape := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	parts := strings.Split(field, ".")
+
+	for i, part := range parts {
+		parts[i] = `"` + escape.Replace(part) + `"`
+	}
+
+	return "$." + strings.Join(parts, ".")
+}
+
+// TextJSON reports whether the server keeps JSON as text (MariaDB), so that
+// every JSON function call parses a document again; queries then push down
+// only what an index answers (query.go, whereOptions).
+func (r *Registry) TextJSON() bool {
+	r.rw.RLock()
+	defer r.rw.RUnlock()
+
+	return r.textJSON
+}

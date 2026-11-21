@@ -249,15 +249,17 @@ func TestFieldsNonfiniteFilterWorksOnEmbeddedDatabase(t *testing.T) {
 	if err != nil || r.Fixed != 0 {
 		t.Fatalf("finite repair: %+v %v", r, err)
 	}
-	for _, value := range []float64{math.Inf(1), math.Inf(-1)} {
-		if _, err = db.Collection("cards").InsertOne(ctx, bson.M{"sort": value}); err == nil {
-			t.Fatalf("FerretDB unexpectedly accepted nonfinite %v", value)
-		}
-	}
+	// The FerretDB fork stores Infinity/-Infinity doubles as MongoDB does
+	// (fork v1.112.0, "Allow storing Infinity/-Infinity doubles"), so an
+	// imported nonfinite sort is repaired here like NaN, not refused on insert.
 	fieldInsert(t, ctx, db, "cards", bson.M{"_id": "nan", "sort": math.NaN()})
-	fieldRun(t, ctx, db, CheckNonfiniteSortRepair, RunNonfiniteSortRepair, 1)
-	if got := fieldRead(t, ctx, db, "cards", "nan")["sort"]; fieldNumber(got) != 0 {
-		t.Fatalf("NaN not repaired: %v", got)
+	fieldInsert(t, ctx, db, "cards", bson.M{"_id": "inf", "sort": math.Inf(1)})
+	fieldInsert(t, ctx, db, "cards", bson.M{"_id": "-inf", "sort": math.Inf(-1)})
+	fieldRun(t, ctx, db, CheckNonfiniteSortRepair, RunNonfiniteSortRepair, 3)
+	for _, id := range []string{"nan", "inf", "-inf"} {
+		if got := fieldRead(t, ctx, db, "cards", id)["sort"]; fieldNumber(got) != 0 {
+			t.Fatalf("%s not repaired: %v", id, got)
+		}
 	}
 	for _, collection := range sortedCollections {
 		for i, want := range values {

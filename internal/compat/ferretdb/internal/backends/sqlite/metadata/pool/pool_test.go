@@ -17,6 +17,8 @@ package pool
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -29,6 +31,103 @@ import (
 	"github.com/FerretDB/FerretDB/internal/util/testutil"
 	"github.com/FerretDB/FerretDB/internal/util/testutil/teststress"
 )
+
+func TestShortSidecarMode(t *testing.T) {
+	t.Parallel()
+	sp, err := state.NewProvider("")
+	require.NoError(t, err)
+	uri := testutil.TestSQLiteURI(t, "")
+	for _, suffix := range []string{"shortnames=1", "dbext=db&shortnames=0", "dbext=db&shortnames=1&mode=memory"} {
+		_, _, err = New(uri+"?"+suffix, testutil.Logger(t), sp)
+		require.ErrorContains(t, err, "shortnames=1 requires dbext=db and file storage")
+	}
+	_, _, err = New(uri+"?8_3_names=1", testutil.Logger(t), sp)
+	require.ErrorContains(t, err, "use shortnames=1")
+
+	for _, name := range []string{"wekan", "a_b-c123"} {
+		require.True(t, shortDatabaseName(name))
+	}
+	for _, name := range []string{"", "with.dot", "über", "toolongdb"} {
+		require.False(t, shortDatabaseName(name))
+	}
+
+	dir := strings.TrimPrefix(uri, "file:")
+	file := filepath.Join(dir, "wekan.db")
+	if err := checkShortSidecarBuild(true); err == nil {
+		p, _, err := New(uri+"?dbext=db&shortnames=1", testutil.Logger(t), sp)
+		require.NoError(t, err)
+		defer p.Close()
+		ctx := testutil.Ctx(t)
+		db, _, err := p.GetOrCreate(ctx, "wekan", nil)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "CREATE TABLE example (id INTEGER UNIQUE)")
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "INSERT INTO example VALUES (1)")
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "INSERT INTO example VALUES (1)")
+		require.True(t, IsUniqueConstraint(err), "%v", err)
+		require.FileExists(t, file)
+		require.FileExists(t, filepath.Join(dir, "wekan.wal"))
+		require.FileExists(t, filepath.Join(dir, "wekan.shm"))
+		require.NoFileExists(t, file+"-wal")
+		require.NoFileExists(t, file+"-shm")
+		return
+	}
+	require.NoError(t, os.WriteFile(file, []byte("existing"), 0o600))
+	_, _, err = New(uri+"?dbext=db&shortnames=1", testutil.Logger(t), sp)
+	require.ErrorContains(t, err, "SQLITE_ENABLE_8_3_NAMES=2")
+	data, err := os.ReadFile(file)
+	require.NoError(t, err)
+	require.Equal(t, "existing", string(data))
+}
+
+func TestDatabaseExtension(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Ctx(t)
+	sp, err := state.NewProvider("")
+	require.NoError(t, err)
+	uri := testutil.TestSQLiteURI(t, "")
+	dir := strings.TrimPrefix(uri, "file:")
+	_, _, err = New(uri+"?dbext=other", testutil.Logger(t), sp)
+	require.ErrorContains(t, err, "dbext must be db or sqlite")
+
+	p, dbs, err := New(uri+"?dbext=db", testutil.Logger(t), sp)
+	require.NoError(t, err)
+	require.Empty(t, dbs)
+	defer p.Close()
+
+	db, created, err := p.GetOrCreate(ctx, "shared", nil)
+	require.NoError(t, err)
+	require.True(t, created)
+	_, err = db.ExecContext(ctx, "CREATE TABLE retained (id INTEGER)")
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(dir, "shared.db"))
+	require.NoFileExists(t, filepath.Join(dir, "shared.sqlite"))
+
+	other, _, err := New(uri, testutil.Logger(t), sp)
+	require.NoError(t, err)
+	defer other.Close()
+	_, _, err = other.GetOrCreate(ctx, "shared", nil)
+	require.ErrorContains(t, err, "conflicting SQLite database path")
+	require.NoFileExists(t, filepath.Join(dir, "shared.sqlite"))
+
+	reopened, existing, err := New(uri+"?dbext=db", testutil.Logger(t), sp)
+	require.NoError(t, err)
+	defer reopened.Close()
+	require.Contains(t, existing, "shared")
+	var count int
+	require.NoError(t, existing["shared"].QueryRowContext(ctx, "SELECT count(*) FROM retained").Scan(&count))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ambiguous.sqlite-wal"), nil, 0o600))
+	_, _, err = p.GetOrCreate(ctx, "ambiguous", nil)
+	require.ErrorContains(t, err, "conflicting SQLite database path")
+	require.NoFileExists(t, filepath.Join(dir, "ambiguous.db"))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shortnames.wal"), nil, 0o600))
+	_, _, err = p.GetOrCreate(ctx, "shortnames", nil)
+	require.ErrorContains(t, err, "conflicting SQLite database path")
+	require.NoFileExists(t, filepath.Join(dir, "shortnames.db"))
+}
 
 func TestCreateDrop(t *testing.T) {
 	t.Parallel()
@@ -47,12 +146,12 @@ func TestCreateDrop(t *testing.T) {
 	db := p.GetExisting(ctx, dbName)
 	require.Nil(t, db)
 
-	db, created, err := p.GetOrCreate(ctx, dbName)
+	db, created, err := p.GetOrCreate(ctx, dbName, nil)
 	require.NoError(t, err)
 	require.NotNil(t, db)
 	require.True(t, created)
 
-	db2, created, err := p.GetOrCreate(ctx, dbName)
+	db2, created, err := p.GetOrCreate(ctx, dbName, nil)
 	require.NoError(t, err)
 	require.Same(t, db, db2)
 	require.False(t, created)
@@ -122,12 +221,12 @@ func TestCreateDropStress(t *testing.T) {
 				db := p.GetExisting(ctx, dbName)
 				require.Nil(t, db)
 
-				db, created, err := p.GetOrCreate(ctx, dbName)
+				db, created, err := p.GetOrCreate(ctx, dbName, nil)
 				require.NoError(t, err)
 				require.NotNil(t, db)
 				require.True(t, created)
 
-				db2, created, err := p.GetOrCreate(ctx, dbName)
+				db2, created, err := p.GetOrCreate(ctx, dbName, nil)
 				require.NoError(t, err)
 				require.Same(t, db, db2)
 				require.False(t, created)
@@ -171,7 +270,7 @@ func TestMemory(t *testing.T) {
 	assert.Empty(t, dbs)
 	t.Cleanup(p0.Close)
 
-	_, created, err := p0.GetOrCreate(ctx, dbName)
+	_, created, err := p0.GetOrCreate(ctx, dbName, nil)
 	require.NoError(t, err)
 	assert.True(t, created)
 
@@ -180,14 +279,14 @@ func TestMemory(t *testing.T) {
 	assert.Empty(t, dbs, "dir content should be ignored for mode=memory")
 	t.Cleanup(p1.Close)
 
-	db1, created, err := p1.GetOrCreate(ctx, dbName)
+	db1, created, err := p1.GetOrCreate(ctx, dbName, nil)
 	require.NoError(t, err)
 	assert.True(t, created)
 
 	_, err = db1.ExecContext(ctx, "CREATE TABLE test (id INT) STRICT")
 	require.NoError(t, err)
 
-	db2, created, err := p1.GetOrCreate(ctx, dbName)
+	db2, created, err := p1.GetOrCreate(ctx, dbName, nil)
 	require.NoError(t, err)
 	assert.False(t, created, "the same database should be returned for the same name")
 	assert.Same(t, db1, db2)
@@ -197,7 +296,7 @@ func TestMemory(t *testing.T) {
 	require.ErrorAs(t, err, &se)
 	assert.Equal(t, sqlite3lib.SQLITE_ERROR, se.Code())
 
-	db2, created, err = p1.GetOrCreate(ctx, testutil.DatabaseName(t)+"2")
+	db2, created, err = p1.GetOrCreate(ctx, testutil.DatabaseName(t)+"2", nil)
 	require.NoError(t, err)
 	assert.True(t, created, "different database should be returned for different name")
 	assert.NotSame(t, db1, db2)
@@ -210,7 +309,7 @@ func TestMemory(t *testing.T) {
 	assert.Empty(t, dbs)
 	t.Cleanup(p2.Close)
 
-	db2, created, err = p2.GetOrCreate(ctx, dbName)
+	db2, created, err = p2.GetOrCreate(ctx, dbName, nil)
 	require.NoError(t, err)
 	assert.True(t, created, "different database should be returned for the same name, but different pool")
 	assert.NotSame(t, db1, db2)
@@ -232,7 +331,7 @@ func TestDefaults(t *testing.T) {
 
 	dbName := testutil.DatabaseName(t)
 
-	db, _, err := p.GetOrCreate(ctx, dbName)
+	db, _, err := p.GetOrCreate(ctx, dbName, nil)
 	require.NoError(t, err)
 
 	rows, err := db.QueryContext(ctx, "PRAGMA compile_options")
@@ -260,8 +359,8 @@ func TestDefaults(t *testing.T) {
 	require.NotContains(t, options, "OMIT_VACUUM")
 
 	for q, expected := range map[string]string{
-		"SELECT sqlite_version()":   "3.53.3",
-		"SELECT sqlite_source_id()": "2026-06-26 20:14:12 d4c0e51e4aeb96955b99185ab9cde75c339e2c29c3f3f12428d364a10d782c62",
+		"SELECT sqlite_version()":   "3.54.1",
+		"SELECT sqlite_source_id()": "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76",
 		"PRAGMA auto_vacuum":        "0",
 		"PRAGMA busy_timeout":       "30000",
 		"PRAGMA encoding":           "UTF-8",

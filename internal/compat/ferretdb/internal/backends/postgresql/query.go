@@ -115,6 +115,32 @@ func prepareWhereClause(p *metadata.Placeholder, sqlFilters *types.Document) (st
 		// that path doesn't handle empty keys.
 		var key any = rootKey
 
+		// A top-level $and is pushed down branch by branch, as the SQLite
+		// backend does: every branch must hold, so ANDing what each branch pushes
+		// down is still a superset, and an ordinary client wrapper such as
+		// {$and: [{boardId: {$in: [...]}}, {$or: [...]}]} uses the boardId index
+		// instead of reading the whole table (90 s for a due cards query among
+		// 615,070 cards). A branch with nothing to push down only widens it.
+		//
+		// A top-level $or is pushed down when EVERY branch pushes something: the
+		// OR of supersets is a superset. One branch with nothing could match any
+		// row, and then the whole $or stays in Go. The due cards query's
+		// {$or: [{members: u}, {assignees: u}, ...]} made the database return every
+		// card of the user's boards for Go to throw nearly all of them away.
+		if rootKey == "$and" || rootKey == "$or" {
+			cond, condArgs, err := logicalWhere(p, rootKey, rootVal)
+			if err != nil {
+				return "", nil, lazyerrors.Error(err)
+			}
+
+			if cond != "" {
+				filters = append(filters, cond)
+				args = append(args, condArgs...)
+			}
+
+			continue
+		}
+
 		// don't pushdown $comment, as it's attached to query with select clause
 		//
 		// all of the other top-level operators such as `$or` do not support pushdown yet
@@ -163,6 +189,25 @@ func prepareWhereClause(p *metadata.Placeholder, sqlFilters *types.Document) (st
 					if f, a := filterEqual(p, key, v, keyOperator); f != "" {
 						filters = append(filters, f)
 						args = append(args, a...)
+					}
+
+				case "$elemMatch":
+					// {members: {$elemMatch: {userId: u, ...}}}: the array contains an
+					// element with each field - `@> '[{"userId": u}]'`, or that field an
+					// array holding u. Each field on its own, so a superset; the field a
+					// literal, so the array's GIN index applies. All Boards and due
+					// cards' visible boards, in an $or with the open permissions, read
+					// every board without it.
+					if keyOperator != "->" {
+						continue
+					}
+
+					if fields, ok := elemMatchFields(v); ok {
+						expr := metadata.DefaultColumn + `->` + quoteLiteral(rootKey)
+						for _, f := range fields {
+							filters = append(filters, fmt.Sprintf(`(%[1]s @> %[2]s OR %[1]s @> %[3]s)`, expr, p.Next(), p.Next()))
+							args = append(args, `[{`+f[0]+`:`+f[1]+`}]`, `[{`+f[0]+`:[`+f[1]+`]}]`)
+						}
 					}
 
 				case "$in":
@@ -253,6 +298,22 @@ func prepareWhereClause(p *metadata.Placeholder, sqlFilters *types.Document) (st
 						sqlOp = "<="
 					}
 
+					// The top-level "ts" key is written as a LITERAL: the capped-collection
+					// index is on ((_jsonb->>'ts')::numeric), and PostgreSQL can match an
+					// index expression only when the key is a constant. With the key as a
+					// parameter, a cached generic plan is a sequential scan (verified with
+					// EXPLAIN on PostgreSQL 18 and plan_cache_mode = force_generic_plan);
+					// only custom plans, which substitute the value, could use the index.
+					if rootKey == "ts" && keyOperator == "->" {
+						filters = append(filters, fmt.Sprintf(
+							`jsonb_typeof(%[1]s->'ts') = 'number' AND (%[1]s->>'ts')::numeric %[2]s %[3]s`,
+							metadata.DefaultColumn, sqlOp, p.Next(),
+						))
+						args = append(args, num)
+
+						continue
+					}
+
 					// keyOperator is "->" or "#>"; the text-extraction form is "->>"/"#>>".
 					filters = append(filters, fmt.Sprintf(
 						`jsonb_typeof(%[1]s%[2]s%[3]s) = 'number' AND (%[1]s%[4]s%[5]s)::numeric %[6]s %[7]s`,
@@ -288,6 +349,127 @@ func prepareWhereClause(p *metadata.Placeholder, sqlFilters *types.Document) (st
 	return filter, args, nil
 }
 
+// elemMatchFields returns the stored JSON of FIELD and value, one pair per field of an
+// $elemMatch {FIELD: value, ...} whose value is a plain scalar - the shape of
+// every membership test. A field with an operator or another kind of value is
+// left out: the condition only has to be a superset. ok=false when none is left.
+func elemMatchFields(v any) ([][2]string, bool) {
+	doc, ok := v.(*types.Document)
+	if !ok || doc.Len() == 0 {
+		return nil, false
+	}
+
+	var res [][2]string
+
+	for _, field := range doc.Keys() {
+		if field == "" || strings.HasPrefix(field, "$") || strings.ContainsRune(field, '.') {
+			continue
+		}
+
+		switch value := must.NotFail(doc.Get(field)).(type) {
+		case string, types.ObjectID, bool, int32:
+		case int64:
+			if value > int64(types.MaxSafeDouble) || value < -int64(types.MaxSafeDouble) {
+				continue
+			}
+		case float64:
+			if math.IsNaN(value) || math.IsInf(value, 0) || value > types.MaxSafeDouble || value < -types.MaxSafeDouble {
+				continue
+			}
+		default:
+			continue
+		}
+
+		res = append(res, [2]string{
+			string(must.NotFail(sjson.MarshalSingleValue(field))),
+			string(must.NotFail(sjson.MarshalSingleValue(must.NotFail(doc.Get(field))))),
+		})
+	}
+
+	return res, len(res) > 0
+}
+
+// withoutDottedKeys returns the branch without its dotted keys. The handler
+// removes those from the top level of a filter, because a dotted path does not
+// cross an array of documents in SQL (`items.k` against items: [{k: "b"}]); a
+// branch of $and or $or reached here with them, and an $or of `items.k` lost
+// the matches. Without them an $and branch only widens, and an $or branch left
+// with nothing makes the whole $or stay in Go.
+func withoutDottedKeys(doc *types.Document) *types.Document {
+	dotted := false
+	for _, k := range doc.Keys() {
+		dotted = dotted || strings.ContainsRune(k, '.')
+	}
+
+	if !dotted {
+		return doc
+	}
+
+	res := doc.DeepCopy()
+	for _, k := range doc.Keys() {
+		if strings.ContainsRune(k, '.') {
+			res.Remove(k)
+		}
+	}
+
+	return res
+}
+
+// logicalWhere is the pushdown of a top-level $and or $or (prepareWhereClause),
+// or "" when there is nothing to push down. An $or that cannot be pushed down
+// gives its placeholders back, so the numbering stays dense.
+func logicalWhere(p *metadata.Placeholder, op string, v any) (string, []any, error) {
+	branches, ok := v.(*types.Array)
+	if !ok || branches.Len() == 0 {
+		return "", nil, nil
+	}
+
+	saved := *p
+
+	var conds []string
+	var args []any
+
+	for i := 0; i < branches.Len(); i++ {
+		branch, ok := must.NotFail(branches.Get(i)).(*types.Document)
+		if ok {
+			branch = withoutDottedKeys(branch)
+		}
+
+		var where string
+		var branchArgs []any
+
+		if ok && branch.Len() > 0 {
+			var err error
+			if where, branchArgs, err = prepareWhereClause(p, branch); err != nil {
+				return "", nil, lazyerrors.Error(err)
+			}
+		}
+
+		if where == "" {
+			if op == "$or" {
+				*p = saved
+				return "", nil, nil
+			}
+
+			continue
+		}
+
+		conds = append(conds, `(`+strings.TrimPrefix(where, ` WHERE `)+`)`)
+		args = append(args, branchArgs...)
+	}
+
+	if len(conds) == 0 {
+		return "", nil, nil
+	}
+
+	joiner := " AND "
+	if op == "$or" {
+		joiner = " OR "
+	}
+
+	return `(` + strings.Join(conds, joiner) + `)`, args, nil
+}
+
 // prepareOrderByClause returns ORDER BY clause with arguments for given sort document.
 //
 // The provided sort document should be already validated.
@@ -318,7 +500,80 @@ func prepareOrderByClause(sort *types.Document) (string, []any) {
 // JSON-null field (what a `null` $in element matches). It returns ok=false when any
 // element has no safe arm (a nested doc/array/binary/regex/Timestamp), since dropping
 // one would make IN a SUBSET, not a superset. The Go filter re-applies the exact $in.
+// filterInIndexed is filterIn for a top-level field and scalar values, written
+// so that PostgreSQL can answer it from the field's index - the same rewrite as
+// filterEqualIndexed: the field a literal, `IN (...)` for the values, and a
+// non-empty array that contains one of them for MongoDB's array matching. It
+// also needs one parameter per value instead of two, which matters for a long
+// list (PostgreSQL takes at most 65,535).
+func filterInIndexed(p *metadata.Placeholder, field string, arr *types.Array) (string, []any, bool) {
+	expr := metadata.DefaultColumn + `->` + quoteLiteral(field)
+
+	var placeholders []string
+	var args []any
+	hasNull := false
+
+	for i := 0; i < arr.Len(); i++ {
+		switch e := must.NotFail(arr.Get(i)).(type) {
+		case types.NullType:
+			hasNull = true
+		case string, types.ObjectID, time.Time:
+			placeholders = append(placeholders, p.Next())
+			args = append(args, string(must.NotFail(sjson.MarshalSingleValue(e))))
+		case bool, int32:
+			placeholders = append(placeholders, p.Next())
+			args = append(args, e)
+		case float64:
+			if e > types.MaxSafeDouble || e < -types.MaxSafeDouble {
+				return "", nil, false
+			}
+
+			placeholders = append(placeholders, p.Next())
+			args = append(args, e)
+		case int64:
+			if e > int64(types.MaxSafeDouble) || e < -int64(types.MaxSafeDouble) {
+				return "", nil, false
+			}
+
+			placeholders = append(placeholders, p.Next())
+			args = append(args, e)
+		default:
+			return "", nil, false
+		}
+	}
+
+	var arms []string
+
+	if len(placeholders) > 0 {
+		arms = append(arms, fmt.Sprintf(`%s IN (%s)`, expr, strings.Join(placeholders, ", ")))
+
+		if field != "_id" {
+			contains := make([]string, len(placeholders))
+			for i, ph := range placeholders {
+				contains[i] = fmt.Sprintf(`%s @> %s`, expr, ph)
+			}
+
+			arms = append(arms, fmt.Sprintf(`(%[1]s >= '[null]'::jsonb AND %[1]s < '{}'::jsonb AND (%[2]s))`,
+				expr, strings.Join(contains, " OR ")))
+		}
+	}
+
+	if hasNull {
+		arms = append(arms, fmt.Sprintf(`(%[1]s IS NULL OR %[1]s = 'null'::jsonb)`, expr))
+	}
+
+	if len(arms) == 0 {
+		return "", nil, false
+	}
+
+	return "(" + strings.Join(arms, " OR ") + ")", args, true
+}
+
 func filterIn(p *metadata.Placeholder, key any, keyOperator string, arr *types.Array) (string, []any, bool) {
+	if field, ok := key.(string); ok && keyOperator == "->" {
+		return filterInIndexed(p, field, arr)
+	}
+
 	var arms []string
 	var args []any
 	hasNull := false
@@ -391,7 +646,69 @@ func numericBoundPG(v any) (any, bool) {
 
 // filterEqual returns the proper SQL filter with arguments that filters documents
 // where the value under k is equal to v.
+// filterEqualIndexed is filterEqual for a top-level field and a scalar value,
+// written so that PostgreSQL can answer it from the field's index.
+//
+// filterEqual's `_jsonb->$1 @> $2` passes the field NAME as a parameter, and an
+// expression index on `_jsonb->'boardId'` cannot match an expression whose key
+// is only known at run time - nor can a btree index serve @>. So every pushed
+// down equality, an _id lookup included, read the whole table.
+//
+// Here the field is a literal, as in the index, and MongoDB's "equal, or an
+// array that contains it" is `= $n`, or a non-empty array that @> $n: two index
+// ranges PostgreSQL can combine. In jsonb's order non-empty arrays sort from
+// '[null]' (the shortest, with the smallest element) to before '{}' - and not
+// from '[]', which for historical reasons sorts below null and would make the
+// range everything but objects. _id is never an array, so it is a plain
+// equality.
+func filterEqualIndexed(p *metadata.Placeholder, field string, v any) (string, []any, bool) {
+	var arg any
+
+	switch v := v.(type) {
+	case string, types.ObjectID, time.Time:
+		arg = string(must.NotFail(sjson.MarshalSingleValue(v)))
+	case bool, int32:
+		arg = v
+	case float64:
+		if v > types.MaxSafeDouble || v < -types.MaxSafeDouble {
+			return "", nil, false
+		}
+
+		arg = v
+	case int64:
+		if v > int64(types.MaxSafeDouble) || v < -int64(types.MaxSafeDouble) {
+			return "", nil, false
+		}
+
+		arg = v
+	default:
+		return "", nil, false
+	}
+
+	expr := metadata.DefaultColumn + `->` + quoteLiteral(field)
+	ph := p.Next()
+
+	if field == "_id" {
+		return fmt.Sprintf(`%s = %s`, expr, ph), []any{arg}, true
+	}
+
+	return fmt.Sprintf(`(%[1]s = %[2]s OR (%[1]s >= '[null]'::jsonb AND %[1]s < '{}'::jsonb AND %[1]s @> %[2]s))`, expr, ph),
+		[]any{arg}, true
+}
+
+// quoteLiteral quotes a field name as a string literal, the same way the
+// registry quotes it in an index expression - so the two expressions match.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 func filterEqual(p *metadata.Placeholder, k any, v any, operator string) (filter string, args []any) {
+	if field, ok := k.(string); ok && operator == "->" {
+		if f, a, ok := filterEqualIndexed(p, field, v); ok {
+			return f, a
+		}
+	}
+
 	// Select if value under the key is equal to provided value.
 	sql := `%[1]s%[2]s%[3]s @> %[4]s`
 

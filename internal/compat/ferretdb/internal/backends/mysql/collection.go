@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"slices"
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
@@ -84,24 +85,70 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 	var where string
 	var args []any
 
-	where, args, err = prepareWhereClause(params.Filter)
+	where, args, err = prepareWhereClauseWith(params.Filter, whereOptions{textJSON: c.r.TextJSON()})
 	if err != nil {
 		return nil, lazyerrors.Error(err)
 	}
 
-	q += where
-
 	sort, sortArgs := prepareOrderByClause(params.Sort)
 
-	q += sort
-	args = append(args, sortArgs...)
+	build := func(narrow string, narrowArgs []any) (string, []any) {
+		w, a := where, slices.Clone(args)
+		if narrow != "" {
+			if w == "" {
+				w = ` WHERE ` + narrow
+			} else {
+				w += ` AND ` + narrow
+			}
+			a = append(a, narrowArgs...)
+		}
 
-	if params.Limit != 0 {
-		q += ` LIMIT ?`
-		args = append(args, params.Limit)
+		query := q + w + sort
+		a = append(a, sortArgs...)
+
+		if params.Limit != 0 {
+			query += ` LIMIT ?`
+			a = append(a, params.Limit)
+		}
+
+		return query, a
 	}
 
-	rows, err := p.QueryContext(ctx, q, args...)
+	// The field indexes answer equalities through their generated columns
+	// (query.go, indexedNarrowing). A table created before those columns had
+	// their current names has them under another (error 1054): it is queried
+	// without the narrowing, as before.
+	//
+	// A membership test from a multikey side table (query_multikey.go) is
+	// the selective condition when there is one - a user is a member of a few
+	// boards of 92,000 - and the other field indexes are then left out, all but
+	// _id's: given `type = 'board'` too, which every board matches, MySQL read
+	// the whole table through that index and All Boards took 1.3 s.
+	indexed := indexedFields(meta.Indexes)
+
+	mk, mkArgs := multikeyWhere(c.dbName, meta, c.r.MultikeyReady, params.Filter)
+	if mk != "" {
+		indexed = map[string]struct{}{"_id": {}}
+	}
+
+	narrow, narrowArgs := indexedNarrowing(params.Filter, indexed)
+	if mk != "" {
+		if narrow != "" {
+			narrow += " AND "
+		}
+
+		narrow += mk
+		narrowArgs = append(narrowArgs, mkArgs...)
+	}
+
+	query, queryArgs := build(narrow, narrowArgs)
+
+	rows, err := p.QueryContext(ctx, query, queryArgs...)
+	if narrow != "" && unknownColumn(err) {
+		query, queryArgs = build("", nil)
+		rows, err = p.QueryContext(ctx, query, queryArgs...)
+	}
+
 	if err != nil {
 		return nil, lazyerrors.Error(err)
 	}
@@ -189,10 +236,10 @@ func (c *collection) UpdateAll(ctx context.Context, params *backends.UpdateAllPa
 	}
 
 	q := fmt.Sprintf(
-		`UPDATE %s.%s SET %s = ? WHERE %s = JSON_EXTRACT(?, '$')`,
+		`UPDATE %s.%s SET %s = ? WHERE %s`,
 		metadata.QuoteIdent(c.dbName), metadata.QuoteIdent(meta.TableName),
 		metadata.DefaultColumn,
-		metadata.IDColumn,
+		idEquals(),
 	)
 
 	err = p.InTransaction(ctx, func(tx *fsql.Tx) error {
@@ -211,7 +258,17 @@ func (c *collection) UpdateAll(ctx context.Context, params *backends.UpdateAllPa
 
 			var stats sql.Result
 
-			stats, err = tx.ExecContext(ctx, q, b, arg)
+			stats, err = tx.ExecContext(ctx, q, b, string(arg), string(arg))
+			if unknownColumn(err) {
+				// A table made before the generated column had its current name.
+				q = fmt.Sprintf(
+					`UPDATE %s.%s SET %s = ? WHERE %s = JSON_EXTRACT(?, '$')`,
+					metadata.QuoteIdent(c.dbName), metadata.QuoteIdent(meta.TableName),
+					metadata.DefaultColumn, metadata.IDColumn,
+				)
+				stats, err = tx.ExecContext(ctx, q, b, string(arg))
+			}
+
 			if err != nil {
 				return lazyerrors.Error(err)
 			}
@@ -292,22 +349,37 @@ func (c *collection) DeleteAll(ctx context.Context, params *backends.DeleteAllPa
 		column = metadata.RecordIDColumn
 	}
 
-	castPlaceholders := placeholders
-	if column == metadata.IDColumn {
-		castPlaceholders = make([]string, len(placeholders))
-		for i := range placeholders {
-			castPlaceholders[i] = "JSON_EXTRACT(?, '$')"
-		}
-	}
-
 	q := fmt.Sprintf(
 		`DELETE FROM %s.%s WHERE %s IN (%s)`,
 		metadata.QuoteIdent(c.dbName), metadata.QuoteIdent(meta.TableName),
 		column,
-		strings.Join(castPlaceholders, ", "),
+		strings.Join(placeholders, ", "),
 	)
 
+	legacy := ""
+	if column == metadata.IDColumn {
+		legacyPlaceholders := make([]string, len(placeholders))
+		for i := range placeholders {
+			legacyPlaceholders[i] = "JSON_EXTRACT(?, '$')"
+		}
+
+		legacy = fmt.Sprintf(
+			`DELETE FROM %s.%s WHERE %s IN (%s)`,
+			metadata.QuoteIdent(c.dbName), metadata.QuoteIdent(meta.TableName),
+			column, strings.Join(legacyPlaceholders, ", "),
+		)
+	}
+
+	legacyArgs := args
+	if column == metadata.IDColumn {
+		q, args = deleteByIDs(c.dbName, meta.TableName, args)
+	}
+
 	res, err := p.ExecContext(ctx, q, args...)
+	if legacy != "" && unknownColumn(err) {
+		// A table made before the generated column had its current name.
+		res, err = p.ExecContext(ctx, legacy, legacyArgs...)
+	}
 	if err != nil {
 		return nil, lazyerrors.Error(err)
 	}
@@ -358,7 +430,7 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 
 	q := `EXPLAIN FORMAT=JSON ` + prepareSelectClause(opts)
 
-	where, args, err := prepareWhereClause(params.Filter)
+	where, args, err := prepareWhereClauseWith(params.Filter, whereOptions{textJSON: c.r.TextJSON()})
 	if err != nil {
 		return nil, lazyerrors.Error(err)
 	}
@@ -504,6 +576,35 @@ func (c *collection) Stats(ctx context.Context, params *backends.CollectionStats
 	}, nil
 }
 
+// CountAll implements backends.Collection interface.
+func (c *collection) CountAll(ctx context.Context, params *backends.CountAllParams) (*backends.CountAllResult, error) {
+	p, err := c.r.DatabaseGetExisting(ctx, c.dbName)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	if p == nil {
+		return new(backends.CountAllResult), nil
+	}
+
+	coll, err := c.r.CollectionGet(ctx, c.dbName, c.name)
+	if err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	if coll == nil {
+		return new(backends.CountAllResult), nil
+	}
+
+	var res backends.CountAllResult
+	q := fmt.Sprintf(`SELECT COUNT(*) FROM %s.%s`, metadata.QuoteIdent(c.dbName), metadata.QuoteIdent(coll.TableName))
+	if err = p.QueryRowContext(ctx, q).Scan(&res.Count); err != nil {
+		return nil, lazyerrors.Error(err)
+	}
+
+	return &res, nil
+}
+
 // Compact implements backends.Collection interface.
 func (c *collection) Compact(ctx context.Context, params *backends.CompactParams) (*backends.CompactResult, error) {
 	p, err := c.r.DatabaseGetExisting(ctx, c.dbName)
@@ -630,3 +731,52 @@ func (c *collection) DropIndexes(ctx context.Context, params *backends.DropIndex
 var (
 	_ backends.Collection = (*collection)(nil)
 )
+
+// The _id of a stored document is matched through the generated column its
+// unique index is built on (SafeColumnName("_id"), JSON_EXTRACT(doc, '$._id')
+// as VARCHAR), compared with the id's sjson text as a plain string.
+//
+// It used to be `JSON_EXTRACT(doc, '$._id') = JSON_EXTRACT(?, '$')`. MariaDB
+// 12.3 answers that comparison of two equal JSON strings with FALSE, so every
+// update and delete by _id matched nothing - and the handler reported the
+// update as made: on MariaDB, edits were silently lost. MySQL compared them
+// correctly, but could not use the _id index for that expression, so each
+// update read the whole table.
+//
+// The generated column has the table's collation, which is case- and
+// accent-insensitive by default on both, so the index finds the candidates and
+// a BINARY comparison keeps only the exact _id.
+func idEquals() string {
+	col := metadata.QuoteIdent(metadata.SafeColumnName("_id"))
+
+	return fmt.Sprintf(`%[1]s = ? AND CAST(%[1]s AS BINARY) = CAST(? AS BINARY)`, col)
+}
+
+// unknownColumn reports MySQL error 1054: a table created before the _id
+// generated column was named by SafeColumnName has it under its old name, and
+// is matched with the previous expression instead.
+func unknownColumn(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1054
+}
+
+// deleteByIDs returns the DELETE of the documents with the given _ids (their
+// sjson texts), matched like idEquals.
+func deleteByIDs(dbName, table string, ids []any) (string, []any) {
+	col := metadata.QuoteIdent(metadata.SafeColumnName("_id"))
+
+	plain := make([]string, len(ids))
+	binary := make([]string, len(ids))
+	for i := range ids {
+		plain[i] = "?"
+		binary[i] = "CAST(? AS BINARY)"
+	}
+
+	q := fmt.Sprintf(
+		`DELETE FROM %s.%s WHERE %[3]s IN (%[4]s) AND CAST(%[3]s AS BINARY) IN (%[5]s)`,
+		metadata.QuoteIdent(dbName), metadata.QuoteIdent(table),
+		col, strings.Join(plain, ", "), strings.Join(binary, ", "),
+	)
+
+	return q, append(append([]any{}, ids...), ids...)
+}

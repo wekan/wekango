@@ -6,8 +6,11 @@ included under `internal/compat/ferretdb` as a local Go module replacement.
 This makes local fork corrections available to clean builds without requiring
 an unpublished commit to be downloaded from GitHub.
 
-The current copy is fork commit `5472f18fbbcde4c2572ff1f0c84cd77dd90d9400`,
-based on v1.73.0 plus the mutation-isolation correction.
+The current copy is fork commit `bfecff34827623829ed11e14bf19b6d027676d96`,
+the fork's v1.112.0 release, which contains the mutation-isolation correction
+(`5472f18f`, imported first on v1.73.0). The fork's v1.112.0 also stores
+Infinity/-Infinity doubles as MongoDB does and keeps new collections as SQLite
+JSONB; reading still accepts text documents of tables not yet converted.
 
 The copy retains the Apache-2.0 license and original file notices. It is not
 relabeled MIT. No new database schema or alternate storage engine is introduced.

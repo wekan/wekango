@@ -83,7 +83,17 @@ func UpdateDocument(ctx context.Context, c backends.Collection, cmd string, iter
 		if !param.HasUpdateOperators {
 			modified, err = processReplacementDoc(cmd, doc, param.Update)
 		} else {
-			modified, err = processUpdateOperator(cmd, doc, param.Update, upsert)
+			// The positional $ operator: each document's own matched element.
+			update := param.Update
+			if upsert && hasPositional(update) {
+				err = handlererrors.NewCommandErrorMsg(handlererrors.ErrBadValue, errPositionalNoMatch)
+			} else if !upsert {
+				update, err = resolvePositional(doc, param.Filter, update)
+			}
+
+			if err == nil {
+				modified, err = processUpdateOperator(cmd, doc, update, upsert)
+			}
 		}
 
 		if err != nil {
@@ -726,14 +736,9 @@ func processMulFieldExpression(command string, doc *types.Document, mulKey strin
 
 	switch {
 	case err == nil:
-		if multiplied, ok := multiplied.(float64); ok && math.IsInf(multiplied, 0) {
-			return false, handlererrors.NewCommandErrorMsg(
-				handlererrors.ErrBadValue,
-				fmt.Sprintf("update produces invalid value: { %q: %f } "+
-					"(update operations that produce infinity values are not allowed)", path, multiplied,
-				),
-			)
-		}
+		// MongoDB itself allows a $mul that overflows to +Inf/-Inf; the storage
+		// encoding (internal/handler/sjson) round-trips infinite doubles the same
+		// way it already did NaN, so there is no reason to refuse the result here.
 
 		// after successfully getting value from path, setting it back cannot fail.
 		must.NoError(doc.SetByPath(path, multiplied))
