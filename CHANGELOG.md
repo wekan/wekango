@@ -2,6 +2,26 @@
 
 # Upcoming WeKan ® release
 
+- [Fix Dependabot alerts #20-#35 and update Go modules to newest](https://github.com/wekan/wekango/commit/214b59b).
+  Thanks to xet7.
+  Refresh the FerretDB runtime copy from the fork's v1.112.0 release, whose
+  module has grpc 1.83.2 and OpenTelemetry 1.47.0; it keeps the mutation gate
+  and now stores Infinity doubles as MongoDB does, so the nonfinite sort repair
+  test inserts and repairs them. Update every Go module to newest: grpc 1.85.0,
+  OpenTelemetry 1.47.0, go-jose v4 4.1.9, Caddy v2.11.9, mongo-driver 2.10.1,
+  x/crypto 0.59.0. go-jose v3, which has no fixed release, leaves the build with
+  smallstep/certificates' master. quic-go stays at v0.63.0, which Caddy needs.
+  Build, vet, all tests and govulncheck pass.
+
+- [Fix code scanning #3: Meteor's password prehash through the crypto registry](https://github.com/wekan/wekango/commit/cdd54d0).
+  Thanks to xet7.
+  The SHA-256 is Meteor's compatibility prehash before the stored salted bcrypt
+  verifier, never stored itself. As caddy-wekan-plugin and WeKan solved the same
+  rule, it is now computed only in meteorPreHash, with crypto.SHA256.New(); the
+  scheme and existing passwords are unchanged. A test checks the digest and
+  scans all own Go code for a fast hash next to a password, with a negative test
+  proving the scan matches the old shape.
+
 - [Preserve re-enabled accounts and concurrent database updates](https://github.com/wekan/wekango/commit/35a37aa).
   Thanks to xet7.
   Accept re-enabled local accounts while preserving historical refusal metadata,
