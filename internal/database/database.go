@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/FerretDB/FerretDB/ferretdb"
 )
@@ -23,6 +24,19 @@ type Config struct {
 	// When supplied it takes precedence over Directory.
 	SQLiteURL string
 	Logger    *slog.Logger
+}
+
+// SQLiteURL is FerretDB's SQLite URI of the absolute directory. A Unix path is
+// file:/var/lib/wekan/ with its special characters escaped, which FerretDB
+// unescapes. A Windows path keeps its drive letter in the opaque part, which
+// FerretDB reads as it is, so it is not escaped: file:C:/Users/existing%20database/
+// was looked for under that literal name and did not open.
+func SQLiteURL(directory string) string {
+	slashed := filepath.ToSlash(directory) + "/"
+	if !strings.HasPrefix(slashed, "/") {
+		return "file:" + slashed
+	}
+	return (&url.URL{Scheme: "file", OmitHost: true, Path: slashed}).String()
 }
 
 // Server owns an in-process FerretDB instance. Its MongoDB endpoint is loopback
@@ -55,7 +69,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		if err = os.MkdirAll(directory, 0o700); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
-		sqliteURI = (&url.URL{Scheme: "file", OmitHost: true, Path: filepath.ToSlash(directory) + "/"}).String()
+		sqliteURI = SQLiteURL(directory)
 	}
 	instance, err := ferretdb.New(&ferretdb.Config{
 		Listener: ferretdb.ListenerConfig{TCP: "127.0.0.1:0"},

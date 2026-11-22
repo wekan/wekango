@@ -43,7 +43,7 @@ func TestExistingFerretDBFilesAndRestart(t *testing.T) {
 	}
 	raw, err := ferretdb.New(&ferretdb.Config{
 		Listener: ferretdb.ListenerConfig{TCP: "127.0.0.1:0"},
-		Handler:  "sqlite", SQLiteURL: (&url.URL{Scheme: "file", OmitHost: true, Path: filepath.ToSlash(directory) + "/"}).String(),
+		Handler:  "sqlite", SQLiteURL: SQLiteURL(directory),
 		Logger: quietLogger(),
 	})
 	if err != nil {
@@ -165,7 +165,7 @@ func TestCancellation(t *testing.T) {
 
 func TestExplicitSQLiteURL(t *testing.T) {
 	directory := t.TempDir()
-	sqliteURL := (&url.URL{Scheme: "file", OmitHost: true, Path: filepath.ToSlash(directory) + "/", RawQuery: "_pragma=busy_timeout(10000)"}).String()
+	sqliteURL := SQLiteURL(directory) + "?_pragma=busy_timeout(10000)"
 	// An explicit URI wins over Directory, so the invalid fallback must not open.
 	server, err := Start(context.Background(), Config{SQLiteURL: sqliteURL, Directory: "\x00", Logger: quietLogger()})
 	if err != nil {
@@ -179,5 +179,35 @@ func TestExplicitSQLiteURL(t *testing.T) {
 			_ = server.Close()
 			t.Fatalf("accepted invalid SQLite URI %q", invalid)
 		}
+	}
+}
+
+// The URI names the directory itself on Unix and on Windows: a Windows path's
+// space or braces escaped in the opaque part was a directory that does not exist.
+func TestSQLiteURLKeepsTheDirectory(t *testing.T) {
+	for directory, want := range map[string]string{
+		"/var/lib/wekan/files/db":                                    "/var/lib/wekan/files/db/",
+		"/tmp/existing database/{}":                                  "/tmp/existing database/{}/",
+		"C:/Users/RUNNER~1/AppData/Local/Temp/existing database/001": "C:/Users/RUNNER~1/AppData/Local/Temp/existing database/001/",
+		"C:/Users/RUNNER~1/AppData/Local/Temp/Test{}3117740374/001":  "C:/Users/RUNNER~1/AppData/Local/Temp/Test{}3117740374/001/",
+	} {
+		got := SQLiteURL(directory)
+		uri, err := url.Parse(got)
+		if err != nil {
+			t.Fatalf("%s: %s does not parse: %v", directory, got, err)
+		}
+		// As FerretDB's parseURI reads it: the path, else the opaque part as is.
+		path := uri.Path
+		if path == "" {
+			path = uri.Opaque
+		}
+		if uri.Scheme != "file" || uri.Host != "" || path != want {
+			t.Fatalf("%s: %s is the directory %q, not %q", directory, got, path, want)
+		}
+	}
+	// Negative: the old escaped opaque form names another directory.
+	old := (&url.URL{Scheme: "file", OmitHost: true, Path: "C:/existing database/"}).String()
+	if uri, _ := url.Parse(old); uri.Opaque == "C:/existing database/" {
+		t.Fatal("negative: the old form was expected to escape the space, so this test proves nothing")
 	}
 }
