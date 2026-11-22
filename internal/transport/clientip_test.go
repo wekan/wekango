@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 // These tests must stay sequential: Caddy configuration is process-global.
 func TestClientAddressThroughCaddy(t *testing.T) {
 	const externalPeer = "127.0.0.2"
+	requireLoopbackAddress(t, externalPeer)
 	type forwardingCase struct {
 		name string
 		xff  []string
@@ -162,4 +164,22 @@ func TestClientAddressThroughCaddy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requireLoopbackAddress: Linux and Windows answer on all of 127.0.0.0/8, macOS
+// only on 127.0.0.1 unless the address is added to lo0, where the dial failed
+// with "bind: can't assign requested address". CI adds it; elsewhere the test
+// is skipped with the command that makes it run.
+func requireLoopbackAddress(t *testing.T, address string) {
+	t.Helper()
+	listener, err := net.Listen("tcp", net.JoinHostPort(address, "0"))
+	if err == nil {
+		_ = listener.Close()
+		return
+	}
+	hint := address + " is not a local address here (on macOS: sudo ifconfig lo0 alias " + address + " up)"
+	if os.Getenv("CI") != "" {
+		t.Fatalf("%s: %v", hint, err)
+	}
+	t.Skipf("%s: %v", hint, err)
 }

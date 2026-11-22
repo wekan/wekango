@@ -34,6 +34,11 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+      # macOS answers only on 127.0.0.1 of the loopback network; the client
+      # address tests also connect from 127.0.0.2.
+      - name: Add 127.0.0.2 to the loopback interface
+        if: runner.os == 'macOS'
+        run: sudo ifconfig lo0 alias 127.0.0.2 up
       - name: Test and build native executable
         env:
           TARGET: ${{ matrix.platform }}
