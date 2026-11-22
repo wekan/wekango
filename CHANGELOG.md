@@ -2,6 +2,29 @@
 
 # Upcoming WeKan ® release
 
+- [Dependency audit: mongo-tools 2026-11-20 is the reviewed pin](https://github.com/wekan/wekango/commit/d66d0b1).
+  Thanks to xet7.
+  The dependencies job failed after the module update: the notice review still
+  approved only the 2026-09-03 mongo-tools, and its test read the module's
+  directory before a fresh module cache had downloaded it. The new module's
+  LICENSE.md is identical and its third-party notices change only permissive
+  attributions; the upstream command entry points are unchanged, so the tools'
+  version, provenance notes and THIRD_PARTY_NOTICES.md name 3f7d4e8de9e4. The
+  dependency audit, its tests and the database tools check pass.
+
+- [macOS: the client address tests connect from 127.0.0.2 on CI](https://github.com/wekan/wekango/commit/e885acd).
+  Thanks to xet7.
+  macOS answers only on 127.0.0.1 of the loopback network, so the test's dial
+  from 127.0.0.2 failed on both macOS runners. The macOS jobs add the address to
+  lo0; a Mac without it skips the test with the command that adds it.
+
+- [Windows: the embedded FerretDB opens a directory whose name has a space or braces](https://github.com/wekan/wekango/commit/9b816ab).
+  Thanks to xet7.
+  The SQLite URI escaped a Windows path's space and braces in the opaque part,
+  which FerretDB reads as it is, so it looked for a directory that does not
+  exist. A Windows directory is now unescaped after file:, a Unix one unchanged;
+  a test covers both, with the old form as the negative case.
+
 - [Fix Dependabot alerts #20-#35 and update Go modules to newest](https://github.com/wekan/wekango/commit/214b59b).
   Thanks to xet7.
   Refresh the FerretDB runtime copy from the fork's v1.112.0 release, whose
