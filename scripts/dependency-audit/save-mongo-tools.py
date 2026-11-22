@@ -12,11 +12,11 @@ from pathlib import Path
 import sys
 
 MODULE = 'github.com/mongodb/mongo-tools'
-VERSION = 'v0.0.0-20260903204226-5df87866650a'
-SUM = 'h1:c3PF12qFA5PDxyMy68LFnc0QaWlCVW4JT/6Vg5swfbY='
+VERSION = 'v0.0.0-20261120204125-3f7d4e8de9e4'
+SUM = 'h1:R7ONl9wxNGSMBFsMLbBQrapEWn96h02CAXzOd415apQ='
 DIGESTS = {
     'LICENSE.md': 'e0b215145cf51c766603856643a746420f60aedfbf9a523a2d82a251cac3cce3',
-    'THIRD-PARTY-NOTICES': '036c3102575183964caff76f2408b455d83e889567c564aed14cb5bda7aa57f9',
+    'THIRD-PARTY-NOTICES': 'd759133ee2848d73a9c57c7a824bd48f4ddd23e81f7b2f233567ab707210c6d0',
 }
 # Exact unmodified text from https://www.apache.org/licenses/LICENSE-2.0.txt.
 APACHE_DIGEST = 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'
@@ -69,7 +69,7 @@ def save(module_file, packages_file, owners_file, notices, inventory,
     with inventory.open('w', newline='') as stream:
         writer = csv.writer(stream)
         for package in imported:
-            writer.writerow((package, 'https://github.com/mongodb/mongo-tools/blob/5df87866650a/LICENSE.md', 'Apache-2.0'))
+            writer.writerow((package, 'https://github.com/mongodb/mongo-tools/blob/3f7d4e8de9e4/LICENSE.md', 'Apache-2.0'))
 
 
 def main():

@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	VersionStr = "main-5df87866650a"
-	GitCommit  = "5df87866650a3ed661b5da6869f430a971ba25e5"
+	VersionStr = "main-3f7d4e8de9e4"
+	GitCommit  = "3f7d4e8de9e458692bdfbb2b0a7204ef4e73018f"
 )
 
 // Recognizes reports whether name selects an embedded Database Tools command.

@@ -22,6 +22,9 @@ spec.loader.exec_module(helper)
 class MongoNoticesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # A fresh module cache, as on CI, has no Dir for a module go list has not
+        # downloaded: download it first.
+        subprocess.check_call(['go', 'mod', 'download', helper.MODULE], cwd=SCRIPT.parents[2])
         cls.module = json.loads(subprocess.check_output(
             ['go', 'list', '-m', '-json', helper.MODULE],
             cwd=SCRIPT.parents[2], text=True))

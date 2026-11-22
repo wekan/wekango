@@ -20,7 +20,7 @@ def run(tool, *args, success=True, extra_env=None):
 
 for tool in ('bsondump', 'mongodump', 'mongorestore', 'mongoexport', 'mongoimport', 'mongofiles', 'mongostat', 'mongotop'):
     result = run(tool, '--version', extra_env={'PORT':'invalid'})
-    assert 'main-5df87866650a' in result.stdout, result.stdout
+    assert 'main-3f7d4e8de9e4' in result.stdout, result.stdout
     run(tool, '--help', extra_env={'PORT':'invalid'})
     run(tool, '--not-a-real-option', success=False)
 source = root/'boards.json'

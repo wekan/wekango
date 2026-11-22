@@ -172,8 +172,8 @@ then commit updated module checksums and audit evidence together.
 ## Embedded MongoDB Database Tools
 
 `github.com/mongodb/mongo-tools` is pinned to
-`v0.0.0-20260903204226-5df87866650a`, the upstream development head resolved
-on 2026-09-07. [Source and license](https://github.com/mongodb/mongo-tools/tree/5df87866650a3ed661b5da6869f430a971ba25e5).
+`v0.0.0-20261120204125-3f7d4e8de9e4`, the upstream development head of
+2026-11-20. [Source and license](https://github.com/mongodb/mongo-tools/tree/3f7d4e8de9e458692bdfbb2b0a7204ef4e73018f).
 This is the same upstream used by `mongo-tools-patches`; that repository currently
 has no applicable source patches in `dist`. All eight command entry points call
 upstream libraries within this executable. Their adapted Apache-2.0 entry points

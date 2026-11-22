@@ -5,7 +5,7 @@
 // a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 
 // Adapted from mongo-tools mongorestore/main/mongorestore.go at upstream
-// 5df87866650a3ed661b5da6869f430a971ba25e5. CLI exits return to the
+// 3f7d4e8de9e458692bdfbb2b0a7204ef4e73018f. CLI exits return to the
 // single-executable dispatcher so deferred resource cleanup can finish.
 package dbtools
 
